@@ -405,7 +405,7 @@ const products = [
     image: productArt("Original Popcorn", "Skinny Pop", "green"),
     score: 51,
     scoring: { nutrition: 28, ingredients: 15, processing: 8 },
-    rating: "Better",
+    rating: "Moderate",
     processing: "Processed",
     allergens: "No major allergen flagged",
     positives: ["Simple ingredient list", "No sugar", "Moderate calories"],
@@ -480,7 +480,7 @@ const products = [
     image: productArt("Peanut Butter", "Simply Spoon", "peanut", "bottle"),
     score: 84,
     scoring: { nutrition: 43, ingredients: 26, processing: 15 },
-    rating: "Excellent",
+    rating: "Good",
     processing: "Minimally processed",
     allergens: "Contains peanuts",
     positives: ["Simple ingredients", "Good protein", "No added sugar"],
@@ -580,7 +580,7 @@ const products = [
     category: "beauty",
     image: productArt("Daily Lotion", "KindSkin", "lotion", "bottle"),
     score: 88,
-    rating: "Excellent",
+    rating: "Good",
     positives: ["Fragrance-free", "Short ingredient list", "Low allergen profile"],
     concerns: ["Preservatives are present"],
     ingredients: [
@@ -629,7 +629,7 @@ const products = [
     category: "household",
     image: productArt("Fresh Scent", "BrightWash", "household", "bottle"),
     score: 58,
-    rating: "Moderate Concern",
+    rating: "Moderate",
     positives: ["Clear warning label", "Effective surfactant system"],
     concerns: ["Fragrance blend", "Skin irritants", "Eye irritation warning"],
     safetyNotes: [
@@ -686,7 +686,7 @@ const products = [
     category: "household",
     image: productArt("Lemon Dish Soap", "ClearSink", "household", "bottle"),
     score: 69,
-    rating: "Fair",
+    rating: "Moderate",
     positives: ["No bleach", "No ammonia", "Biodegradable surfactant claim"],
     concerns: ["Fragrance", "Skin dryness for some users"],
     safetyNotes: ["Avoid eye contact", "Rinse hands if irritation occurs", "Do not ingest"],
@@ -711,7 +711,7 @@ const products = [
     category: "household",
     image: productArt("All-Purpose", "SparkHome", "cleaner", "bottle"),
     score: 47,
-    rating: "Concern",
+    rating: "Bad",
     positives: ["Clear label warnings"],
     concerns: ["Fragrance", "Harsh cleaner", "Do-not-mix warning"],
     safetyNotes: [
@@ -1022,8 +1022,41 @@ async function lookupProductByBarcode(rawBarcode, { catalog = products } = {}) {
   if (!barcode) {
     return { status: "empty", barcode, product: null, confidence: "Manual Review" };
   }
+  if (/^0+$/.test(barcode)) {
+    return {
+      status: "not_found",
+      barcode,
+      product: null,
+      confidence: "Manual Review",
+      source: "manual-fallback"
+    };
+  }
 
   const realFoodResult = await lookupOpenFoodFactsFood(barcode);
+  if (realFoodResult.product && isCompleteFoodProduct(realFoodResult.product)) {
+    return {
+      status: "found",
+      barcode,
+      product: realFoodResult.product,
+      confidence: getConfidence(realFoodResult.product),
+      source: "food-provider"
+    };
+  }
+
+  const generalBarcodeResult = await lookupUpcItemDbProduct(barcode);
+  if (generalBarcodeResult.product) {
+    const product = realFoodResult.product
+      ? mergeFoodProductWithBarcodeIdentity(realFoodResult.product, generalBarcodeResult.product)
+      : generalBarcodeResult.product;
+    return {
+      status: "found",
+      barcode,
+      product,
+      confidence: getConfidence(product),
+      source: "barcode-provider"
+    };
+  }
+
   if (realFoodResult.product) {
     return {
       status: "found",
@@ -1072,6 +1105,27 @@ async function lookupOpenFoodFactsFood(barcode) {
     return { product: normalizeOpenFoodFactsProduct(payload.product, barcode), error: null };
   } catch (error) {
     console.warn("Food barcode lookup failed", error);
+    return { product: null, error: "network" };
+  }
+}
+
+async function lookupUpcItemDbProduct(barcode) {
+  try {
+    const response = await fetch("/api/upc/lookup", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ upc: barcode })
+    });
+    if (!response.ok) return { product: null, error: "request-failed" };
+    const payload = await response.json();
+    const item = asArray(payload.items)[0];
+    if (!item) return { product: null, error: "not-found" };
+    return { product: normalizeUpcItemDbProduct(item, barcode), error: null };
+  } catch (error) {
+    console.warn("General barcode lookup failed", error);
     return { product: null, error: "network" };
   }
 }
@@ -1345,10 +1399,117 @@ function formatAllergens(value) {
 }
 
 function getRatingFromScore(score) {
-  if (score >= 85) return "Excellent";
+  if (score >= 90) return "Very Good";
   if (score >= 70) return "Good";
   if (score >= 50) return "Moderate";
+  if (score >= 11) return "Bad";
+  if (score <= 10) return "Very Bad";
   return "Bad";
+}
+
+function isCompleteFoodProduct(product) {
+  return Boolean(
+    product?.name &&
+    !product.name.startsWith("Food product") &&
+    product.brand &&
+    product.brand !== "Unknown brand" &&
+    product.image
+  );
+}
+
+function mergeFoodProductWithBarcodeIdentity(foodProduct, identityProduct) {
+  const image = foodProduct.image || identityProduct.image;
+  const name = foodProduct.name?.startsWith("Food product") ? identityProduct.name : foodProduct.name;
+  const brand = foodProduct.brand === "Unknown brand" ? identityProduct.brand : foodProduct.brand;
+  return {
+    ...foodProduct,
+    name,
+    brand,
+    image,
+    description: foodProduct.description || identityProduct.description,
+    barcode: foodProduct.barcode || identityProduct.barcode,
+    dataConfidence: getOpenFoodFactsConfidence({
+      image,
+      ingredients: foodProduct.ingredients || [],
+      nutrition: foodProduct.nutrition || {}
+    })
+  };
+}
+
+function normalizeUpcItemDbProduct(item, barcode) {
+  const name = cleanText(item.title || item.model) || `Barcode product ${barcode}`;
+  const brand = cleanText(item.brand) || "Unknown brand";
+  const categoryPath = cleanText(item.category);
+  const category = inferCategoryFromProductText([name, brand, categoryPath, item.description].join(" "));
+  const image = asArray(item.images).find(Boolean) || "";
+  const product = {
+    id: `upc-${normalizeBarcode(item.ean || item.upc || item.gtin || barcode)}`,
+    barcode: normalizeBarcode(item.ean || item.upc || item.gtin || barcode),
+    name,
+    brand,
+    category,
+    image,
+    sourceType: "barcode-provider",
+    dataConfidence: "Partial",
+    description: cleanText(item.description),
+    analysisPending: true,
+    summaryStatus: "Scan label to score",
+    rating: "Partial match",
+    concerns: ["Scan or paste the label to complete analysis"],
+    positives: ["Product identity found"],
+    ingredients: [],
+    breakdown: [
+      { label: "Product", value: "Found", detail: "Identity and image matched" },
+      { label: "Label", value: "Needed", detail: "Ingredients and nutrition not returned" },
+      { label: "Confidence", value: "Partial", detail: "Complete by scanning the label" },
+      { label: "Category", value: categoryMeta[category]?.shortLabel || "Product", detail: categoryPath || "General barcode match" }
+    ],
+    alternatives: []
+  };
+
+  if (category === "medicine") {
+    return {
+      ...product,
+      rating: "Label Summary",
+      summaryStatus: "Not Health Scored",
+      activeIngredient: "Scan label to confirm",
+      purpose: "Review product label",
+      warnings: ["Scan or paste the label to complete analysis", "Follow the product label", "Ask a doctor or pharmacist if unsure"],
+      inactiveIngredients: []
+    };
+  }
+
+  if (category === "textile") {
+    return {
+      ...product,
+      rating: "Material Summary",
+      summaryStatus: "Scan label to confirm",
+      materialSummary: "Material label needed",
+      concernLevel: "Unknown",
+      treatmentNotes: "Scan or paste the label to complete material analysis.",
+      sensitiveSkinNotes: "Review the material and care label before use.",
+      washBeforeUse: true,
+      materials: []
+    };
+  }
+
+  if (category === "household") {
+    return {
+      ...product,
+      safetyNotes: ["Scan or paste the label to complete analysis", "Review the product label before use"]
+    };
+  }
+
+  return product;
+}
+
+function inferCategoryFromProductText(value) {
+  const lower = value.toLowerCase();
+  if (/(medicine|drug|ibuprofen|acetaminophen|vitamin|supplement|cough|allergy|pain reliever|otc)/.test(lower)) return "medicine";
+  if (/(shirt|towel|fabric|textile|cotton|polyester|nylon|spandex|apparel|clothing)/.test(lower)) return "textile";
+  if (/(detergent|cleaner|laundry|dish soap|soap|disinfect|freshener|household|fabric softener|spray)/.test(lower)) return "household";
+  if (/(shampoo|conditioner|lotion|deodorant|cosmetic|sunscreen|toothpaste|skin|beauty|body wash|scrub)/.test(lower)) return "beauty";
+  return "food";
 }
 
 function clamp(value, min, max) {
@@ -1356,12 +1517,13 @@ function clamp(value, min, max) {
 }
 
 function getScoreClass(score) {
-  if (score >= 75) return "score-good";
+  if (score >= 70) return "score-good";
   if (score >= 50) return "score-mid";
   return "score-bad";
 }
 
 function getScoreLabel(product) {
+  if (product.analysisPending) return "Needs Label";
   if (product.category === "medicine") return "Not Health Scored";
   if (product.category === "textile") return product.summaryStatus || "Material Summary";
   return `${product.score}/100`;
@@ -1619,7 +1781,7 @@ function createManualReport({
   return {
     ...baseProduct,
     score,
-    rating: score >= 75 ? "Good" : score >= 50 ? "Moderate" : "Concern"
+    rating: getRatingFromScore(score)
   };
 }
 
@@ -2196,7 +2358,7 @@ function ScanScreen({
 
   async function startNativeDetection() {
     if (!("BarcodeDetector" in window)) {
-      setCameraMessage("Camera active. Use Can't scan? for manual barcode entry if this browser cannot detect automatically.");
+      setCameraMessage("Camera active - enter barcode manually if needed.");
       return;
     }
 
@@ -2216,7 +2378,7 @@ function ScanScreen({
         detectorRef.current = new Detector();
       }
     } catch {
-      setCameraMessage("Camera active. Use Can't scan? for manual barcode entry if automatic detection does not start.");
+      setCameraMessage("Camera active - enter barcode manually if needed.");
       return;
     }
 
@@ -2235,7 +2397,7 @@ function ScanScreen({
           }
         }
       } catch {
-        setCameraMessage("Camera active. Use Can't scan? if automatic detection does not catch the barcode.");
+        setCameraMessage("Camera active - enter barcode manually if needed.");
       }
       scanFrameRef.current = window.requestAnimationFrame(detectFrame);
     };
@@ -2281,6 +2443,8 @@ function ScanScreen({
     const lookupValue = normalizeBarcode(nextBarcode ?? barcode);
     setBarcode(lookupValue);
     if (!lookupValue) {
+      setLookupLoading(false);
+      setSheetProduct(null);
       setSheetMode("not-found");
       setSheetState("mid");
       return;
@@ -2288,6 +2452,7 @@ function ScanScreen({
 
     setLookupLoading(true);
     clearBarcodeMiss();
+    setSheetProduct(null);
     const result = await lookupProductByBarcode(lookupValue);
     window.setTimeout(() => {
       setLookupLoading(false);
@@ -2458,7 +2623,7 @@ function ScanScreen({
         barcode={barcode}
         setBarcode={setBarcode}
         lookupLoading={lookupLoading}
-        onLookup={() => runBarcodeLookup()}
+        onLookup={runBarcodeLookup}
         activeFallback={activeFallback}
         openFallback={openFallback}
         manualText={manualText}
@@ -2620,7 +2785,7 @@ function ScannerResultBar({ product }) {
         <strong>{product.name}</strong>
         <span>{product.brand}</span>
       </div>
-      <em className={product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)}>
+      <em className={product.analysisPending || product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)}>
         {getScoreLabel(product)}
       </em>
     </div>
@@ -2668,6 +2833,11 @@ function ScannerFallbackSheet({
   applyOcrReview,
   useSampleProduct
 }) {
+  function handleBarcodeSubmit(event) {
+    event.preventDefault();
+    onLookup(barcode);
+  }
+
   return (
     <div className="scanner-fallback-sheet">
       <div className="sheet-title">
@@ -2683,16 +2853,17 @@ function ScannerFallbackSheet({
 
       {activeFallback === "barcode" && (
         <div className="scanner-inline-panel">
-          <div className="inline-form">
+          <form className="inline-form" onSubmit={handleBarcodeSubmit}>
             <input
-              id="barcode-input"
+              id={`barcode-input-${title.replace(/\W+/g, "-").toLowerCase()}`}
               value={barcode}
               onChange={(event) => setBarcode(event.target.value)}
-              placeholder="Try 0023807019876"
+              placeholder="Try 3017620422003"
               inputMode="numeric"
+              autoComplete="off"
             />
-            <button onClick={onLookup}>{lookupLoading ? "Checking" : "Lookup"}</button>
-          </div>
+            <button type="submit" disabled={lookupLoading}>{lookupLoading ? "Checking" : "Lookup"}</button>
+          </form>
         </div>
       )}
 
@@ -3026,7 +3197,7 @@ function ReportScreen({
   const counts = getRiskCounts(product.ingredients || []);
   const isMedicine = product.category === "medicine";
   const isTextile = product.category === "textile";
-  const isSummary = isMedicine || isTextile;
+  const isSummary = isMedicine || isTextile || product.analysisPending;
   const scoreClass = isSummary ? "score-neutral" : getScoreClass(product.score);
   const flaggedIngredients = (product.actionIngredients?.length
     ? product.actionIngredients
@@ -3049,9 +3220,9 @@ function ReportScreen({
           </div>
           <div className={`score-block ${scoreClass}`}>
             <strong>
-              {isMedicine ? "Label Summary" : isTextile ? "Material Summary" : `${product.score}/100`}
+              {product.analysisPending ? "Needs Label" : isMedicine ? "Label Summary" : isTextile ? "Material Summary" : `${product.score}/100`}
             </strong>
-            <span>{isSummary ? product.summaryStatus : product.rating}</span>
+            <span>{product.analysisPending ? product.summaryStatus || "Scan label to score" : isSummary ? product.summaryStatus : product.rating}</span>
           </div>
         </div>
       </section>
@@ -3065,9 +3236,15 @@ function ReportScreen({
         </>
       ) : (
         <>
-          {isTextile ? <TextileSummary product={product} /> : product.category === "food" ? <ScoreSummary product={product} /> : null}
+          {isTextile ? <TextileSummary product={product} /> : product.category === "food" && !product.analysisPending ? <ScoreSummary product={product} /> : null}
 
           <ReportAtAGlance product={product} />
+
+          {product.analysisPending && (
+            <section className="note-card">
+              Scan or paste the label to complete analysis.
+            </section>
+          )}
 
           {!isTextile && (
             <section className="breakdown-grid">
@@ -3141,7 +3318,7 @@ function ReportScreen({
             </div>
           </section>
 
-          {product.category === "food" && (
+          {product.category === "food" && !product.analysisPending && (
             <FoodNutrition product={product} dailyTotals={dailyTotals} dailyLog={dailyLog} onAddToDailyLog={onAddToDailyLog} />
           )}
 
@@ -3701,8 +3878,8 @@ function ProductListCard({ product, onClick, meta }) {
           <strong>{product.name}</strong>
           <small>{product.brand}</small>
           <span className="history-status">
-            <i className={product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)} />
-            {product.category === "medicine" || product.category === "textile" ? product.summaryStatus || product.rating : product.rating}
+            <i className={product.analysisPending || product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)} />
+            {product.analysisPending ? "Needs Label" : product.category === "medicine" || product.category === "textile" ? product.summaryStatus || product.rating : product.rating}
           </span>
           <span className="history-date">{meta}</span>
         </div>
@@ -3722,9 +3899,9 @@ function ProductListCard({ product, onClick, meta }) {
         <small>{product.brand}</small>
         {meta && <small>{meta}</small>}
       </div>
-      <div className={`list-score ${product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)}`}>
+      <div className={`list-score ${product.analysisPending || product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)}`}>
         <span>{getScoreLabel(product)}</span>
-        <small>{product.rating}</small>
+        <small>{product.analysisPending ? "Partial" : product.rating}</small>
       </div>
     </button>
   );

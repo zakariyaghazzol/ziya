@@ -11,6 +11,12 @@ export default defineConfig({
         changeOrigin: true,
         secure: true,
         rewrite: (path) => path.replace(/^\/food-name-search/, "/cgi/search.pl")
+      },
+      "/api/upc/lookup": {
+        target: "https://api.upcitemdb.com",
+        changeOrigin: true,
+        secure: true,
+        rewrite: () => "/prod/trial/lookup"
       }
     }
   }
