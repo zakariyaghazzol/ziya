@@ -11,7 +11,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Clipboard,
   Copy,
   Droplets,
   Dumbbell,
@@ -1685,7 +1684,7 @@ function getConfidence(product) {
   return "Demo Data";
 }
 
-function ProductImage({ product, alt, ...props }) {
+function ProductImage({ product, alt, className = "", ...props }) {
   const [failed, setFailed] = useState(false);
   const imageKey = `${product.id}-${product.image || ""}-${product.userPhoto || ""}`;
 
@@ -1698,6 +1697,7 @@ function ProductImage({ product, alt, ...props }) {
       loading="lazy"
       decoding="async"
       {...props}
+      className={`product-image ${className}`.trim()}
       src={failed ? getProductPlaceholder(product) : getProductImage(product)}
       alt={alt || product.name}
       onError={() => setFailed(true)}
@@ -3163,8 +3163,39 @@ function ScanScreen({
     setSheetState((current) => (current === "peek" ? "mid" : "full"));
   }
 
+  function resumeDetection() {
+    scanResolvedRef.current = false;
+    setCameraMessage("Camera active - scan barcode or enter it manually.");
+    if (cameraEngine === "html5" && html5ScannerRef.current?.isScanning) {
+      try {
+        html5ScannerRef.current.resume();
+        return;
+      } catch {
+        // The scanner may already be running.
+      }
+    }
+    if (cameraEngine === "zxing" && streamRef.current) void startZxingDetection();
+  }
+
+  function dismissSheet() {
+    setSheetMode(null);
+    setSheetProduct(null);
+    setSheetState("peek");
+    setActiveFallback(null);
+    setExpandedSection(null);
+    resumeDetection();
+  }
+
   function collapseSheet() {
-    setSheetState((current) => (current === "full" ? "mid" : current === "mid" ? "peek" : "peek"));
+    if (sheetState === "full") {
+      setSheetState(sheetMode === "product" ? "peek" : "mid");
+      return;
+    }
+    if (sheetState === "mid" && sheetMode === "product") {
+      setSheetState("peek");
+      return;
+    }
+    dismissSheet();
   }
 
   function handleSheetPointerDown(event) {
@@ -3176,6 +3207,7 @@ function ScanScreen({
     if (dragStartY.current == null) return;
     const delta = event.clientY - dragStartY.current;
     dragStartY.current = null;
+    if (Math.abs(delta) > 38) event.currentTarget.dataset.dragged = "true";
     if (delta < -38) expandSheet();
     if (delta > 38) collapseSheet();
   }
@@ -3196,6 +3228,9 @@ function ScanScreen({
       />
       <div className="scanner-fallback-bg" />
       <div className="scanner-shade" />
+      {sheetMode === "product" && sheetState === "peek" && (
+        <button className="scanner-sheet-dismiss-layer" onClick={dismissSheet} aria-label="Dismiss scan result" />
+      )}
 
       <div className="scanner-top-controls">
         <button className={`glass-circle ${flashOn ? "is-on" : ""}`} onClick={toggleFlash} aria-label="Toggle flashlight">
@@ -3399,17 +3434,37 @@ function ScannerBottomSheet({
   const isProduct = mode === "product" && product;
   const canPeek = isProduct;
 
-  function toggleSheet() {
+  function toggleSheet(event) {
+    if (event?.currentTarget?.dataset.dragged === "true") {
+      delete event.currentTarget.dataset.dragged;
+      return;
+    }
     if (sheetState === "peek") setSheetState("mid");
     else if (sheetState === "mid") setSheetState("full");
     else setSheetState(canPeek ? "peek" : "mid");
   }
 
   return (
-    <section className={`scanner-sheet scanner-sheet-${sheetState} scanner-sheet-${mode}`}>
-      <button className="sheet-grabber" onPointerDown={onPointerDown} onPointerUp={onPointerUp} onClick={toggleSheet} aria-label="Expand scan result">
+    <section
+      key={`${mode}-${product?.id || "empty"}`}
+      className={`scanner-sheet scanner-sheet-${sheetState} scanner-sheet-${mode}`}
+      data-sheet-state={sheetState}
+    >
+      <button
+        className="sheet-grabber"
+        onPointerDown={onPointerDown}
+        onPointerUp={onPointerUp}
+        onClick={toggleSheet}
+        aria-label={sheetState === "full" ? "Collapse scan result" : "Expand scan result"}
+      >
         <span />
       </button>
+
+      {isProduct && sheetState === "full" && (
+        <button className="sheet-collapse-button" onClick={() => setSheetState("peek")} aria-label="Return to compact result">
+          <ChevronDown size={20} />
+        </button>
+      )}
 
       {isProduct && sheetState !== "full" && (
         <>
@@ -3538,13 +3593,9 @@ function ScannerResultBar({ product, onExpand }) {
 
 function ScannerMiniDetails({ product, onExpand }) {
   const lines = product.category === "medicine" ? product.warnings : product.concerns;
-  const isSummary = product.analysisPending || product.category === "medicine" || product.category === "textile";
   return (
     <div className="scanner-mini-details">
-      <div className="mini-score-line">
-        <span>{product.analysisPending ? "Product found" : product.category === "medicine" ? "Label Summary" : product.category === "textile" ? "Material Summary" : product.rating}</span>
-        <strong>{isSummary ? product.summaryStatus || getScoreLabel(product) : `${product.score}/100`}</strong>
-      </div>
+      <span className="scanner-mini-heading">Why this result</span>
       <div className="simple-list">
         {lines?.slice(0, 2).map((item) => (
           <div className="simple-row" key={item}>
@@ -3616,8 +3667,8 @@ function ScannerFallbackSheet({
       {activeFallback === "barcode" && (
         <div className="scanner-fallback-panel">
           <div className="fallback-panel-copy">
-            <strong>Enter the barcode</strong>
-            <span>Type the UPC or EAN printed below the bars.</span>
+            <strong>Enter barcode</strong>
+            <span>Use the digits printed below the bars.</span>
           </div>
           <form className="inline-form" onSubmit={handleBarcodeSubmit}>
             <input
@@ -3652,12 +3703,12 @@ function ScannerFallbackSheet({
       {activeFallback === "label" && (
         <div className="scanner-fallback-panel">
           <div className="fallback-panel-copy">
-            <strong>Review the product label</strong>
-            <span>Add a label photo, then confirm the extracted or entered fields.</span>
+            <strong>Add label photo</strong>
+            <span>Complete missing ingredients, nutrition, or warnings.</span>
           </div>
-          <button className="secondary-button compact-action" onClick={() => document.getElementById("label-photo")?.click()}>
+          <button className="primary-button fallback-primary-action" onClick={() => document.getElementById("label-photo")?.click()}>
             <Camera size={17} />
-            Add label photo
+            {labelPhoto ? "Replace label photo" : "Take or upload label"}
           </button>
           {labelPhoto && <img className="scanner-photo-preview" src={labelPhoto} alt="Label selected for review" />}
           {ocrReview && <OcrReviewPanel review={ocrReview} setReview={setOcrReview} applyOcrReview={applyOcrReview} />}
@@ -3668,12 +3719,14 @@ function ScannerFallbackSheet({
         <div className="scanner-fallback-panel">
           <div className="fallback-panel-copy">
             <strong>Add a product photo</strong>
-            <span>Use the front of the package for this report only.</span>
+            <span>Use the front of the package in this report.</span>
           </div>
-          <button className="secondary-button compact-action" onClick={() => document.getElementById("product-photo")?.click()}>
-            <Camera size={17} />
-            Choose product photo
-          </button>
+          {!capturedPhoto && (
+            <button className="primary-button fallback-primary-action" onClick={() => document.getElementById("product-photo")?.click()}>
+              <Camera size={17} />
+              Take or upload photo
+            </button>
+          )}
           {capturedPhoto && <img className="scanner-photo-preview" src={capturedPhoto} alt="User-selected product" />}
           {capturedPhoto && finishProductPhoto && hasMatchedProduct && (
             <button className="primary-button full" onClick={finishProductPhoto}>
@@ -3702,8 +3755,8 @@ function ManualIngredientPanel({
   return (
     <div className="manual-inline-panel">
       <div className="fallback-panel-copy">
-        <strong>Paste the label text</strong>
-        <span>Choose the product type, then add the ingredient or material list.</span>
+        <strong>Paste ingredients</strong>
+        <span>Choose the product type, then paste the label.</span>
       </div>
       <textarea
         id="ingredient-paste"
@@ -3807,25 +3860,39 @@ function OcrReviewPanel({ review, setReview, applyOcrReview }) {
         />
       </label>
       {review.category === "food" && (
-        <div className="nutrition-editor">
-          {[
-            ["servingSize", "Serving"],
-            ["calories", "Calories"],
-            ["protein", "Protein"],
-            ["carbs", "Carbs"],
-            ["fat", "Fat"],
-            ["sugar", "Sugar"],
-            ["sodium", "Sodium"]
-          ].map(([field, label]) => (
-            <label key={field}>
-              <span>{label}</span>
-              <input
-                value={review.nutrition?.[field] ?? ""}
-                onChange={(event) => updateNutrition(field, event.target.value)}
-              />
-            </label>
-          ))}
-        </div>
+        <>
+          <label className="full-label nutrition-serving-field">
+            <span>Serving size</span>
+            <input
+              value={review.nutrition?.servingSize ?? ""}
+              placeholder="Example: 2 tbsp (37g)"
+              onChange={(event) => updateNutrition("servingSize", event.target.value)}
+            />
+          </label>
+          <div className="nutrition-editor">
+            {[
+              ["calories", "Calories", "200"],
+              ["protein", "Protein (g)", "8"],
+              ["carbs", "Carbs (g)", "24"],
+              ["fat", "Fat (g)", "9"],
+              ["sugar", "Sugar (g)", "6"],
+              ["sodium", "Sodium (mg)", "180"]
+            ].map(([field, label, example]) => (
+              <label key={field}>
+                <span>{label}</span>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min="0"
+                  step="any"
+                  value={review.nutrition?.[field] ?? ""}
+                  placeholder={`Example: ${example}`}
+                  onChange={(event) => updateNutrition(field, event.target.value)}
+                />
+              </label>
+            ))}
+          </div>
+        </>
       )}
       {review.category === "medicine" && (
         <div className="review-grid medicine-review">
@@ -4051,43 +4118,84 @@ function getMissingProductFields(product) {
   return missing;
 }
 
+function getProductFieldCompleteness(product) {
+  const confidence = product.fieldConfidence || {};
+  const available = (field, fallback) => {
+    if (confidence[field] === "Missing") return "Missing";
+    if (confidence[field] === "Partial") return "Partial";
+    return fallback ? "Available" : "Missing";
+  };
+  const fields = [
+    {
+      label: "Product identity",
+      status: product.name && !/^barcode product|^food product/i.test(product.name) ? available("identity", true) : "Partial"
+    },
+    { label: "Product image", status: product.image || product.userPhoto ? "Available" : "Missing" },
+    {
+      label: "Category",
+      status: product.category === "unknown" ? "Needs label" : product.analysisPending && product.sourceType === "barcode-provider" ? "Inferred" : "Available"
+    }
+  ];
+
+  if (product.category === "textile") {
+    fields.push({ label: "Materials", status: available("materials", Boolean(product.materials?.length || product.ingredients?.length)) });
+    fields.push({ label: "Care details", status: available("care", Boolean(product.treatmentNotes)) });
+  } else if (product.category === "medicine") {
+    fields.push({ label: "Active ingredient", status: available("activeIngredient", Boolean(product.activeIngredient)) });
+    fields.push({ label: "Warnings", status: available("warnings", Boolean(product.warnings?.length)) });
+  } else {
+    fields.push({ label: "Ingredients", status: available("ingredients", Boolean(product.ingredients?.length)) });
+    if (product.category === "food") {
+      fields.push({ label: "Nutrition", status: available("nutrition", hasCoreFoodNutrition(product.nutrition)) });
+      fields.push({
+        label: "Additives / allergens",
+        status: confidence.additives === "Missing" || confidence.allergens === "Missing" ? "Missing" : "Available"
+      });
+    } else if (product.category === "household") {
+      fields.push({ label: "Warning label", status: available("cautions", Boolean(product.safetyNotes?.length)) });
+    }
+  }
+  return fields.slice(0, 6);
+}
+
 function LabelCompletionPanel({ product, onCompleteLabel }) {
   const missingFields = getMissingProductFields(product);
   if (!missingFields.length) return null;
-  const imageMissing = missingFields.includes("Product photo");
-
-  return (
-    <section className="label-completion-card">
+  const fields = getProductFieldCompleteness(product);
+  const onlyImageMissing = missingFields.length === 1 && missingFields[0] === "Product photo";
+  const onlyIngredientsMissing = missingFields.every((field) => ["Ingredients", "Additives", "Allergens"].includes(field));
+  const actionMode = onlyImageMissing ? "photo" : onlyIngredientsMissing ? "paste" : "label";
+  const actionLabel = onlyImageMissing ? "Add product photo" : onlyIngredientsMissing ? "Paste ingredients" : "Add label photo";
+  const content = (
+    <>
       <div className="label-completion-heading">
         <span className="label-completion-icon"><Camera size={18} /></span>
         <div>
           <span className="eyebrow">Needs label</span>
           <h2>Complete this report</h2>
-          <p>Add only the missing details. Existing product data will stay in place.</p>
+          <p>Keep the product match and add only what is missing.</p>
         </div>
+        <ChevronRight size={19} />
       </div>
-      <div className="missing-field-chips" aria-label="Missing product details">
-        {missingFields.map((field) => <span key={field}>{field}</span>)}
+      <div className="field-completeness" aria-label="Product data completeness">
+        {fields.map((field) => (
+          <span key={field.label}>
+            <small>{field.label}</small>
+            <strong className={`field-status-${field.status.toLowerCase().replace(/\s+/g, "-")}`}>{field.status}</strong>
+          </span>
+        ))}
       </div>
-      {onCompleteLabel && (
-        <div className="label-completion-actions">
-          <button className="primary-button" onClick={() => onCompleteLabel("label")}>
-            <Camera size={17} />
-            Add label details
-          </button>
-          <button className="quiet-action" onClick={() => onCompleteLabel("paste")}>
-            <Clipboard size={16} />
-            Paste label text
-          </button>
-          {imageMissing && (
-            <button className="quiet-action" onClick={() => onCompleteLabel("photo")}>
-              <Plus size={16} />
-              Add product photo
-            </button>
-          )}
-        </div>
-      )}
-    </section>
+      <span className="label-completion-cta">
+        <Camera size={16} />
+        {actionLabel}
+      </span>
+    </>
+  );
+  if (!onCompleteLabel) return <section className="label-completion-card">{content}</section>;
+  return (
+    <button className="label-completion-card is-action" onClick={() => onCompleteLabel(actionMode)}>
+      {content}
+    </button>
   );
 }
 
@@ -4171,6 +4279,7 @@ function ReportScreen({
             <ExpandableSection
               id="breakdown"
               title="Score breakdown"
+              subtitle="Nutrition, ingredients, and processing"
               icon={FlaskConical}
               expandedSection={expandedSection}
               setExpandedSection={setExpandedSection}
@@ -4193,6 +4302,7 @@ function ReportScreen({
           <ExpandableSection
             id="concerns"
             title={isTextile ? "Material notes" : "All concerns"}
+            subtitle={`${product.concerns?.length || 0} ${product.concerns?.length === 1 ? "reason" : "reasons"}`}
             icon={AlertTriangle}
             expandedSection={expandedSection}
             setExpandedSection={setExpandedSection}
@@ -4209,7 +4319,8 @@ function ReportScreen({
 
           <ExpandableSection
             id="positives"
-            title={product.category === "household" ? "Positives" : "Positives"}
+            title="Positives"
+            subtitle={`${product.positives?.length || 0} ${product.positives?.length === 1 ? "positive" : "positives"}`}
             icon={Check}
             expandedSection={expandedSection}
             setExpandedSection={setExpandedSection}
@@ -4225,14 +4336,14 @@ function ReportScreen({
           </ExpandableSection>
 
           {(product.ingredients?.length > 0 || isTextile) && (
-            <section className="card">
-              <div className="section-heading">
-                <div>
-                  <span className="eyebrow">{isTextile ? "Materials" : "Ingredients"}</span>
-                  <h2>{isTextile ? "Material summary" : "Ingredient safety"}</h2>
-                </div>
-                <Info size={20} />
-              </div>
+            <ExpandableSection
+              id="ingredients"
+              title={isTextile ? "Material details" : "Ingredient details"}
+              subtitle={`${product.ingredients?.length || 0} listed - ${counts.moderate + counts.harmful} flagged`}
+              icon={Info}
+              expandedSection={expandedSection}
+              setExpandedSection={setExpandedSection}
+            >
               <div className="risk-counts">
                 <RiskCount label="Safe" value={counts.safe} type="safe" />
                 <RiskCount label="Moderate" value={counts.moderate} type="moderate" />
@@ -4249,17 +4360,27 @@ function ReportScreen({
                   </button>
                 ))}
               </div>
-            </section>
+            </ExpandableSection>
           )}
 
           {product.category === "food" && !product.analysisPending && (
-            <FoodNutrition product={product} onAddToDailyLog={onAddToDailyLog} />
+            <ExpandableSection
+              id="nutrition"
+              title="Nutrition"
+              subtitle={hasNumber(product.nutrition?.calories) ? `${product.nutrition.calories} calories - tap for macros` : "Needs label"}
+              icon={Utensils}
+              expandedSection={expandedSection}
+              setExpandedSection={setExpandedSection}
+            >
+              <FoodNutrition product={product} onAddToDailyLog={onAddToDailyLog} embedded />
+            </ExpandableSection>
           )}
 
           {product.category === "household" && (
             <ExpandableSection
               id="safety"
               title="Safety notes"
+              subtitle={`${product.safetyNotes?.length || 0} label cautions`}
               icon={ShieldCheck}
               expandedSection={expandedSection}
               setExpandedSection={setExpandedSection}
@@ -4443,11 +4564,11 @@ function MedicineSummary({ product }) {
   );
 }
 
-function FoodNutrition({ product, onAddToDailyLog }) {
+function FoodNutrition({ product, onAddToDailyLog, embedded = false }) {
   const n = product.nutrition || {};
   const canLog = hasNumber(n.calories);
   return (
-    <section className="card nutrition-card">
+    <section className={`${embedded ? "nutrition-card-embedded" : "card nutrition-card"}`}>
       <div className="section-heading">
         <div>
           <span className="eyebrow">Nutrition</span>
@@ -4879,14 +5000,17 @@ function IngredientSheet({ ingredient, onClose }) {
   );
 }
 
-function ExpandableSection({ id, title, icon: Icon, expandedSection, setExpandedSection, children }) {
+function ExpandableSection({ id, title, subtitle, icon: Icon, expandedSection, setExpandedSection, children }) {
   const open = expandedSection === id;
   return (
     <section className="card expandable">
-      <button onClick={() => setExpandedSection(open ? "" : id)}>
-        <span>
-          <Icon size={20} />
-          {title}
+      <button aria-expanded={open} onClick={() => setExpandedSection(open ? "" : id)}>
+        <span className="expandable-title">
+          <i><Icon size={19} /></i>
+          <span>
+            <strong>{title}</strong>
+            {subtitle && <small>{subtitle}</small>}
+          </span>
         </span>
         {open ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
       </button>
