@@ -1231,7 +1231,7 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
     },
     ingredients,
     concerns: concerns.length ? concerns : ["Review full label"],
-    positives: positives.length ? positives : ["Barcode match found"],
+    positives: positives.length ? positives : [ingredients.length ? "Ingredient list available" : "Product identified"],
     nutrition,
     alternatives: ["skinny-pop", "protein-bar", "peanut-butter"]
   };
@@ -1569,6 +1569,8 @@ function ProductImage({ product, alt, ...props }) {
 
   return (
     <img
+      loading="lazy"
+      decoding="async"
       {...props}
       src={failed ? getProductPlaceholder(product) : getProductImage(product)}
       alt={alt || product.name}
@@ -1977,7 +1979,7 @@ function App() {
   const [activeTab, setActiveTab] = useState("scan");
   const [selectedProductId, setSelectedProductId] = useState("pop-secret");
   const [dynamicProducts, setDynamicProducts] = useState([]);
-  const [scanHistory, setScanHistory] = useState(historySeed);
+  const [scanHistory, setScanHistory] = useState([]);
   const [barcode, setBarcode] = useState("");
   const [barcodeMiss, setBarcodeMiss] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -2005,7 +2007,7 @@ function App() {
 
   const selectedProduct = productIndex.get(selectedProductId) || products[0];
   const realProducts = useMemo(
-    () => dynamicProducts.filter((product) => product.sourceType === "food-provider"),
+    () => dynamicProducts.filter((product) => ["food-provider", "barcode-provider"].includes(product.sourceType)),
     [dynamicProducts]
   );
 
@@ -2045,8 +2047,8 @@ function App() {
       const nextMap = new Map(items.map((item) => [item.id, item]));
       nextProducts.forEach((product) => nextMap.set(product.id, product));
       return Array.from(nextMap.values()).sort((a, b) => {
-        const aReal = a.sourceType === "food-provider" ? 0 : 1;
-        const bReal = b.sourceType === "food-provider" ? 0 : 1;
+        const aReal = ["food-provider", "barcode-provider"].includes(a.sourceType) ? 0 : 1;
+        const bReal = ["food-provider", "barcode-provider"].includes(b.sourceType) ? 0 : 1;
         return aReal - bReal;
       });
     });
@@ -2189,7 +2191,7 @@ function App() {
       );
     }
     if (activeTab === "recs") {
-      return <RecommendationsScreen productIndex={productIndex} realProducts={realProducts} onOpenProduct={openProduct} />;
+      return <RecommendationsScreen productIndex={productIndex} history={scanHistory} onOpenProduct={openProduct} />;
     }
     if (activeTab === "top") {
       return <TopScreen productIndex={productIndex} realProducts={realProducts} onOpenProduct={openProduct} />;
@@ -2320,6 +2322,9 @@ function ScanScreen({
   const streamRef = useRef(null);
   const detectorRef = useRef(null);
   const scanFrameRef = useRef(null);
+  const detectionTimerRef = useRef(null);
+  const cameraTimerRef = useRef(null);
+  const cameraRequestRef = useRef(0);
   const scanResolvedRef = useRef(false);
   const dragStartY = useRef(null);
 
@@ -2334,21 +2339,24 @@ function ScanScreen({
       window.cancelAnimationFrame(scanFrameRef.current);
       scanFrameRef.current = null;
     }
+    if (detectionTimerRef.current) {
+      window.clearTimeout(detectionTimerRef.current);
+      detectionTimerRef.current = null;
+    }
     detectorRef.current = null;
   }
 
   function releaseCamera() {
+    cameraRequestRef.current += 1;
+    if (cameraTimerRef.current) {
+      window.clearTimeout(cameraTimerRef.current);
+      cameraTimerRef.current = null;
+    }
     pauseDetection();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     scanResolvedRef.current = false;
     if (videoRef.current) videoRef.current.srcObject = null;
-  }
-
-  function stopCamera(nextStatus = "paused", nextMessage = "") {
-    releaseCamera();
-    setCameraStatus(nextStatus);
-    setCameraMessage(nextMessage);
   }
 
   useEffect(() => {
@@ -2382,6 +2390,12 @@ function ScanScreen({
       return;
     }
 
+    const scheduleDetection = (detectFrame) => {
+      detectionTimerRef.current = window.setTimeout(() => {
+        scanFrameRef.current = window.requestAnimationFrame(detectFrame);
+      }, 160);
+    };
+
     const detectFrame = async () => {
       if (!detectorRef.current || !videoRef.current || scanResolvedRef.current) return;
       try {
@@ -2398,8 +2412,10 @@ function ScanScreen({
         }
       } catch {
         setCameraMessage("Camera active - enter barcode manually if needed.");
+        pauseDetection();
+        return;
       }
-      scanFrameRef.current = window.requestAnimationFrame(detectFrame);
+      scheduleDetection(detectFrame);
     };
 
     scanFrameRef.current = window.requestAnimationFrame(detectFrame);
@@ -2408,17 +2424,43 @@ function ScanScreen({
   async function startCamera() {
     clearBarcodeMiss();
     setActiveFallback(null);
-    stopCamera("requesting", "Requesting camera permission...");
+    releaseCamera();
+    const requestId = cameraRequestRef.current;
+    setFlashOn(false);
+    setCameraStatus("requesting");
+    setCameraMessage("Requesting camera permission...");
 
-    if (!navigator.mediaDevices?.getUserMedia) {
+    if (!window.isSecureContext) {
       setCameraStatus("unavailable");
-      setCameraMessage("Camera scanning requires browser permission and may require HTTPS or localhost.");
+      setCameraMessage("Camera access needs HTTPS or localhost. Manual barcode lookup is ready.");
       openFallback("barcode");
       return;
     }
 
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraStatus("unavailable");
+      setCameraMessage("This browser cannot open the camera. Manual barcode lookup is ready.");
+      openFallback("barcode");
+      return;
+    }
+
+    cameraTimerRef.current = window.setTimeout(() => {
+      if (cameraRequestRef.current !== requestId) return;
+      setCameraStatus("unavailable");
+      setCameraMessage("Camera access is taking longer than expected. Manual lookup is ready.");
+      openFallback("barcode");
+    }, 7000);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (cameraRequestRef.current !== requestId) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      if (cameraTimerRef.current) {
+        window.clearTimeout(cameraTimerRef.current);
+        cameraTimerRef.current = null;
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -2428,6 +2470,11 @@ function ScanScreen({
       setCameraMessage("");
       await startNativeDetection();
     } catch (error) {
+      if (cameraRequestRef.current !== requestId) return;
+      if (cameraTimerRef.current) {
+        window.clearTimeout(cameraTimerRef.current);
+        cameraTimerRef.current = null;
+      }
       const denied = error?.name === "NotAllowedError" || error?.name === "PermissionDeniedError";
       setCameraStatus(denied ? "denied" : "unavailable");
       setCameraMessage(
@@ -2436,6 +2483,24 @@ function ScanScreen({
           : "Camera unavailable. Camera scanning requires browser permission and may require HTTPS or localhost."
       );
       openFallback("barcode");
+    }
+  }
+
+  async function toggleFlash() {
+    const track = streamRef.current?.getVideoTracks?.()[0];
+    const capabilities = track?.getCapabilities?.();
+    if (!track || !capabilities?.torch) {
+      setFlashOn(false);
+      setCameraMessage("Flash is not available on this camera.");
+      return;
+    }
+    const nextFlash = !flashOn;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: nextFlash }] });
+      setFlashOn(nextFlash);
+    } catch {
+      setFlashOn(false);
+      setCameraMessage("Flash is not available on this camera.");
     }
   }
 
@@ -2453,8 +2518,8 @@ function ScanScreen({
     setLookupLoading(true);
     clearBarcodeMiss();
     setSheetProduct(null);
-    const result = await lookupProductByBarcode(lookupValue);
-    window.setTimeout(() => {
+    try {
+      const result = await lookupProductByBarcode(lookupValue);
       setLookupLoading(false);
       if (result.status === "found" && result.product) {
         setManualProduct(result.product);
@@ -2468,7 +2533,12 @@ function ScanScreen({
       setSheetProduct(null);
       setSheetMode("not-found");
       setSheetState("mid");
-    }, 320);
+    } catch {
+      setLookupLoading(false);
+      setSheetProduct(null);
+      setSheetMode("not-found");
+      setSheetState("mid");
+    }
   }
 
   function openFallback(mode) {
@@ -2553,7 +2623,7 @@ function ScanScreen({
       <div className="scanner-shade" />
 
       <div className="scanner-top-controls">
-        <button className={`glass-circle ${flashOn ? "is-on" : ""}`} onClick={() => setFlashOn((value) => !value)} aria-label="Toggle flashlight">
+        <button className={`glass-circle ${flashOn ? "is-on" : ""}`} onClick={toggleFlash} aria-label="Toggle flashlight">
           <Flashlight size={21} />
         </button>
         <button className={`glass-circle ${soundOn ? "is-on" : ""}`} onClick={() => setSoundOn((value) => !value)} aria-label="Toggle sound">
@@ -2578,7 +2648,7 @@ function ScanScreen({
                 ? "Camera permission denied"
                 : "Camera unavailable"}
         </p>
-        {cameraMessage && <small>{cameraMessage}</small>}
+        {cameraMessage && !sheetMode && <small>{cameraMessage}</small>}
       </div>
 
       <button className="scanner-cant-scan" onClick={() => openFallback("barcode")}>
@@ -2754,7 +2824,7 @@ function ScannerBottomSheet({
       {mode === "fallback" && (
         <ScannerFallbackSheet
           title="Can't scan?"
-          copy="Use one fallback and keep the camera flow open."
+          copy="Choose another way to identify this product."
           barcode={barcode}
           setBarcode={setBarcode}
           lookupLoading={lookupLoading}
@@ -2778,6 +2848,7 @@ function ScannerBottomSheet({
 }
 
 function ScannerResultBar({ product }) {
+  const isSummary = product.analysisPending || product.category === "medicine" || product.category === "textile";
   return (
     <div className="scanner-result-bar">
       <ProductImage product={product} alt={product.name} />
@@ -2785,8 +2856,9 @@ function ScannerResultBar({ product }) {
         <strong>{product.name}</strong>
         <span>{product.brand}</span>
       </div>
-      <em className={product.analysisPending || product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)}>
-        {getScoreLabel(product)}
+      <em className={isSummary ? "neutral" : getScoreClass(product.score)}>
+        <strong>{getScoreLabel(product)}</strong>
+        <small>{product.analysisPending ? "Partial" : isSummary ? product.rating : product.rating}</small>
       </em>
     </div>
   );
@@ -2794,16 +2866,17 @@ function ScannerResultBar({ product }) {
 
 function ScannerMiniDetails({ product, onExpand }) {
   const lines = product.category === "medicine" ? product.warnings : product.concerns;
+  const isSummary = product.analysisPending || product.category === "medicine" || product.category === "textile";
   return (
     <div className="scanner-mini-details">
       <div className="mini-score-line">
-        <span>{product.category === "medicine" ? "Label Summary" : product.category === "textile" ? "Material Summary" : product.rating}</span>
-        <strong>{product.category === "medicine" || product.category === "textile" ? product.summaryStatus : `${product.score}/100`}</strong>
+        <span>{product.analysisPending ? "Product found" : product.category === "medicine" ? "Label Summary" : product.category === "textile" ? "Material Summary" : product.rating}</span>
+        <strong>{isSummary ? product.summaryStatus || getScoreLabel(product) : `${product.score}/100`}</strong>
       </div>
       <div className="simple-list">
         {lines?.slice(0, 2).map((item) => (
           <div className="simple-row" key={item}>
-            <span className="status-dot red" />
+            <span className={`status-dot ${product.analysisPending ? "yellow" : "red"}`} />
             <span>{item}</span>
           </div>
         ))}
@@ -3083,15 +3156,7 @@ function SearchScreen({ query, setQuery, results, status, lastSearchTerm, onSear
     .map((id) => products.find((product) => product.id === id))
     .filter(Boolean)
     .slice(0, 5);
-  const showSamples = !query.trim();
-  const heading =
-    showSamples
-      ? "Try a sample"
-      : status === "searching"
-        ? "Searching"
-        : lastSearchTerm
-          ? "Food results"
-          : "Search results";
+  const showIntro = !query.trim();
 
   return (
     <div className="stack">
@@ -3103,73 +3168,116 @@ function SearchScreen({ query, setQuery, results, status, lastSearchTerm, onSear
           onSearch(query);
         }}
       >
-        <Search size={20} />
+        <Search size={20} aria-hidden="true" />
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Search food products"
         />
+        <button type="submit" aria-label="Submit search">
+          <ChevronRight size={20} />
+        </button>
       </form>
-      <section className="stack small-gap">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">{showSamples ? "Optional demo data" : "Results"}</span>
-            <h2>{heading}</h2>
+      {status === "searching" ? (
+        <EmptyState title="Searching products" copy="Looking for matching food labels and images." />
+      ) : showIntro ? (
+        <>
+          <EmptyState title="Search by product name" copy="Find food products, nutrition, and ingredient details." />
+          <SampleDisclosure title="Try a sample">
+            {samples.map((product) => (
+              <ProductListCard key={product.id} product={product} onClick={() => onOpenProduct(product.id)} />
+            ))}
+          </SampleDisclosure>
+        </>
+      ) : (
+        <section className="stack small-gap">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">Results</span>
+              <h2>{lastSearchTerm ? `Results for ${lastSearchTerm}` : "Search results"}</h2>
+            </div>
           </div>
-        </div>
-        {status === "searching" ? (
-          <EmptyState title="Searching products" copy="Looking for matching food labels and images." />
-        ) : showSamples ? (
-          samples.map((product) => (
-            <ProductListCard key={product.id} product={product} onClick={() => onOpenProduct(product.id)} />
-          ))
-        ) : results.length ? (
-          results.map((product) => (
-            <ProductListCard key={product.id} product={product} onClick={() => onOpenProduct(product.id)} />
-          ))
-        ) : status === "ready" ? (
-          <EmptyState title="Ready to search" copy="Press Enter to look up real food products." />
-        ) : (
-          <EmptyState title="No products found" copy="Try another product name or scan a barcode." />
-        )}
-      </section>
+          {results.length ? (
+            results.map((product) => (
+              <ProductListCard key={product.id} product={product} onClick={() => onOpenProduct(product.id)} />
+            ))
+          ) : status === "ready" ? (
+            <EmptyState title="Ready to search" copy="Press Enter to look up matching products." />
+          ) : (
+            <EmptyState title="No products found" copy="Try another product name or scan a barcode." />
+          )}
+        </section>
+      )}
     </div>
   );
 }
 
 function TopScreen({ productIndex, realProducts, onOpenProduct }) {
+  const [selectedCategory, setSelectedCategory] = useState("all");
   const shownProducts = featuredSampleIds
     .map((id) => productIndex.get(id))
     .filter(Boolean)
-    .slice(0, 5);
+    .filter((product) => selectedCategory === "all" || product.category === selectedCategory)
+    .slice(0, 6);
+  const shownRealProducts = realProducts
+    .filter((product) => selectedCategory === "all" || product.category === selectedCategory)
+    .slice(0, 6);
+  const categoryFilters = [
+    ["all", "All"],
+    ["food", "Food"],
+    ["beauty", "Beauty"],
+    ["household", "Home"],
+    ["medicine", "Medicine"],
+    ["textile", "Fabric"]
+  ];
   return (
     <div className="stack">
       <Header eyebrow="Top" title="Popular picks" />
-      {realProducts.length > 0 && (
+      <div className="filter-tabs" role="group" aria-label="Product category">
+        {categoryFilters.map(([value, label]) => (
+          <button key={value} className={selectedCategory === value ? "active" : ""} onClick={() => setSelectedCategory(value)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {shownRealProducts.length > 0 ? (
         <section className="stack small-gap">
           <div className="section-heading">
             <div>
-              <span className="eyebrow">Your real lookups</span>
+              <span className="eyebrow">Your lookups</span>
               <h2>Recently found</h2>
             </div>
           </div>
-          {realProducts.slice(0, 5).map((product) => (
+          {shownRealProducts.map((product) => (
             <ProductListCard key={product.id} product={product} onClick={() => onOpenProduct(product.id)} />
           ))}
         </section>
+      ) : (
+        <EmptyState title="No products here yet" copy="Scan or search to build your real product list." />
       )}
-      <section className="stack small-gap">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">Optional demo data</span>
-            <h2>Try a sample</h2>
-          </div>
-        </div>
+      <SampleDisclosure title="Try sample products">
         {shownProducts.map((product) => (
           <ProductListCard key={product.id} product={product} onClick={() => onOpenProduct(product.id)} />
         ))}
-      </section>
+        {!shownProducts.length && <EmptyState title="No sample in this category" copy="Choose another category." compact />}
+      </SampleDisclosure>
     </div>
+  );
+}
+
+function SampleDisclosure({ title, children }) {
+  return (
+    <details className="sample-disclosure">
+      <summary>
+        <span>
+          <Sparkles size={17} />
+          <strong>{title}</strong>
+          <small>Optional demo</small>
+        </span>
+        <ChevronDown size={19} />
+      </summary>
+      <div className="sample-disclosure-body stack small-gap">{children}</div>
+    </details>
   );
 }
 
@@ -3199,6 +3307,9 @@ function ReportScreen({
   const isTextile = product.category === "textile";
   const isSummary = isMedicine || isTextile || product.analysisPending;
   const scoreClass = isSummary ? "score-neutral" : getScoreClass(product.score);
+  const confidenceStatus = getConfidence(product);
+  const imageStatus = getImageStatus(product);
+  const showImageStatus = imageStatus !== confidenceStatus && ["Placeholder", "User Photo"].includes(imageStatus);
   const flaggedIngredients = (product.actionIngredients?.length
     ? product.actionIngredients
     : product.ingredients?.filter((ingredient) => ingredient.risk !== "safe").map((ingredient) => ingredient.name)) || [];
@@ -3215,14 +3326,17 @@ function ReportScreen({
           <h1>{product.name}</h1>
           <p>{product.brand}</p>
           <div className="data-badges">
-            <ConfidenceBadge status={getConfidence(product)} />
-            <ConfidenceBadge status={getImageStatus(product)} />
+            <ConfidenceBadge status={confidenceStatus} />
+            {showImageStatus && <ConfidenceBadge status={imageStatus} />}
           </div>
           <div className={`score-block ${scoreClass}`}>
-            <strong>
-              {product.analysisPending ? "Needs Label" : isMedicine ? "Label Summary" : isTextile ? "Material Summary" : `${product.score}/100`}
-            </strong>
-            <span>{product.analysisPending ? product.summaryStatus || "Scan label to score" : isSummary ? product.summaryStatus : product.rating}</span>
+            <span className="score-status-dot" />
+            <div>
+              <strong>
+                {product.analysisPending ? "Needs Label" : isMedicine ? "Label Summary" : isTextile ? "Material Summary" : `${product.score}/100`}
+              </strong>
+              <span>{product.analysisPending ? product.summaryStatus || "Scan label to score" : isSummary ? product.summaryStatus : product.rating}</span>
+            </div>
           </div>
         </div>
       </section>
@@ -3236,7 +3350,7 @@ function ReportScreen({
         </>
       ) : (
         <>
-          {isTextile ? <TextileSummary product={product} /> : product.category === "food" && !product.analysisPending ? <ScoreSummary product={product} /> : null}
+          {isTextile ? <TextileSummary product={product} /> : null}
 
           <ReportAtAGlance product={product} />
 
@@ -3246,16 +3360,27 @@ function ReportScreen({
             </section>
           )}
 
-          {!isTextile && (
-            <section className="breakdown-grid">
-              {product.breakdown?.map((item) => (
-                <div className="breakdown-card" key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
-                  <small>{item.detail}</small>
-                </div>
-              ))}
-            </section>
+          {!isTextile && !product.analysisPending && product.breakdown?.length > 0 && (
+            <ExpandableSection
+              id="breakdown"
+              title="Score breakdown"
+              icon={FlaskConical}
+              expandedSection={expandedSection}
+              setExpandedSection={setExpandedSection}
+            >
+              <ScoreSummary product={product} />
+              <div className="report-detail-rows">
+                {product.breakdown.map((item) => (
+                  <div className="report-detail-row" key={item.label}>
+                    <div>
+                      <strong>{item.label}</strong>
+                      <span>{item.detail}</span>
+                    </div>
+                    <em>{item.value}</em>
+                  </div>
+                ))}
+              </div>
+            </ExpandableSection>
           )}
 
           <ExpandableSection
@@ -3292,34 +3417,36 @@ function ReportScreen({
             </div>
           </ExpandableSection>
 
-          <section className="card">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">{isTextile ? "Materials" : "Ingredients"}</span>
-                <h2>{isTextile ? "Material summary" : "Ingredient safety"}</h2>
+          {(product.ingredients?.length > 0 || isTextile) && (
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">{isTextile ? "Materials" : "Ingredients"}</span>
+                  <h2>{isTextile ? "Material summary" : "Ingredient safety"}</h2>
+                </div>
+                <Info size={20} />
               </div>
-              <Info size={20} />
-            </div>
-            <div className="risk-counts">
-              <RiskCount label="Safe" value={counts.safe} type="safe" />
-              <RiskCount label="Moderate" value={counts.moderate} type="moderate" />
-              <RiskCount label="Harmful" value={counts.harmful} type="harmful" />
-            </div>
-            <div className="ingredient-chips">
-              {product.ingredients?.slice(0, 8).map((ingredient) => (
-                <button
-                  className={`ingredient-chip ${riskMeta[ingredient.risk].className}`}
-                  key={`${ingredient.name}-${ingredient.type}`}
-                  onClick={() => onIngredientClick(ingredient)}
-                >
-                  {ingredient.name}
-                </button>
-              ))}
-            </div>
-          </section>
+              <div className="risk-counts">
+                <RiskCount label="Safe" value={counts.safe} type="safe" />
+                <RiskCount label="Moderate" value={counts.moderate} type="moderate" />
+                <RiskCount label="Harmful" value={counts.harmful} type="harmful" />
+              </div>
+              <div className="ingredient-chips">
+                {product.ingredients?.slice(0, 8).map((ingredient) => (
+                  <button
+                    className={`ingredient-chip ${riskMeta[ingredient.risk].className}`}
+                    key={`${ingredient.name}-${ingredient.type}`}
+                    onClick={() => onIngredientClick(ingredient)}
+                  >
+                    {ingredient.name}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
 
           {product.category === "food" && !product.analysisPending && (
-            <FoodNutrition product={product} dailyTotals={dailyTotals} dailyLog={dailyLog} onAddToDailyLog={onAddToDailyLog} />
+            <FoodNutrition product={product} onAddToDailyLog={onAddToDailyLog} />
           )}
 
           {product.category === "household" && (
@@ -3381,24 +3508,28 @@ function ReportAtAGlance({ product }) {
   const supportDot = product.category === "household" || product.category === "textile" ? "yellow" : "green";
 
   return (
-    <section className="at-a-glance">
-      <div className="glance-card">
+    <section className="card report-reasons">
+      <div className="report-reason-group">
         <span>{product.category === "textile" ? "Material notes" : "Main concerns"}</span>
-        {concernItems.map((item) => (
-          <div className="simple-row" key={item}>
-            <span className="status-dot red" />
-            <strong>{item}</strong>
-          </div>
-        ))}
+        <div className="report-native-list">
+          {concernItems.map((item) => (
+            <div className="report-native-row" key={item}>
+              <span className="status-dot red" />
+              <strong>{item}</strong>
+            </div>
+          ))}
+        </div>
       </div>
-      <div className="glance-card">
+      <div className="report-reason-group">
         <span>{supportTitle}</span>
-        {supportItems.map((item) => (
-          <div className="simple-row" key={item}>
-            <span className={`status-dot ${supportDot}`} />
-            <strong>{item}</strong>
-          </div>
-        ))}
+        <div className="report-native-list">
+          {supportItems.map((item) => (
+            <div className="report-native-row" key={item}>
+              <span className={`status-dot ${supportDot}`} />
+              <strong>{item}</strong>
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -3411,24 +3542,19 @@ function ScoreSummary({ product }) {
       : product.category === "beauty"
         ? { total: scoreBeautyProduct(product), nutrition: null, ingredients: null, processing: null }
         : { total: scoreHouseholdProduct(product), nutrition: null, ingredients: null, processing: null };
-  return (
-    <section className="score-explainer">
-      <div>
-        <span className="eyebrow">Category-specific score</span>
-        <h2>{product.category === "food" ? "Nutrition, ingredients, processing" : product.category === "beauty" ? "Ingredient concern, irritation, fragrance" : "Chemical caution, irritation, environment"}</h2>
-      </div>
-      {product.category === "food" ? (
-        <div className="score-bars">
+  return product.category === "food" ? (
+    <div className="score-summary-compact">
+      <p>Nutrition, ingredients, and processing are scored separately.</p>
+      <div className="score-bars">
           <ScoreBar label="Nutrition" value={computed.nutrition} max={50} />
           <ScoreBar label="Ingredients" value={computed.ingredients} max={35} />
           <ScoreBar label="Processing" value={computed.processing} max={15} />
-        </div>
-      ) : (
-        <p>
-          Ziya scores this category with its own rules, so calories never appear on beauty or household products.
-        </p>
-      )}
-    </section>
+      </div>
+    </div>
+  ) : (
+    <p className="report-detail-note">
+      This score uses category-specific ingredient, irritation, fragrance, and caution rules.
+    </p>
   );
 }
 
@@ -3510,16 +3636,15 @@ function MedicineSummary({ product }) {
   );
 }
 
-function FoodNutrition({ product, dailyTotals, dailyLog, onAddToDailyLog }) {
+function FoodNutrition({ product, onAddToDailyLog }) {
   const n = product.nutrition || {};
-  const remaining = 2200 - dailyTotals.calories;
   const canLog = hasNumber(n.calories);
   return (
-    <section className="card">
+    <section className="card nutrition-card">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">Food only</span>
-          <h2>Nutrition and daily log</h2>
+          <span className="eyebrow">Nutrition</span>
+          <h2>Calories and macros</h2>
         </div>
         <div className="nutrition-status">
           <ConfidenceBadge status={product.nutritionConfidence || getConfidence(product)} />
@@ -3529,50 +3654,29 @@ function FoodNutrition({ product, dailyTotals, dailyLog, onAddToDailyLog }) {
       {product.nutritionConfidence === "Estimated" && (
         <p className="estimate-note">Nutrition is estimated from a fallback nutrition search. Confirm the label when available.</p>
       )}
-      <div className="macro-grid">
-        {n.servingSize && <Macro label="Serving" value={n.servingSize} unit="" />}
+      <div className="macro-grid macro-grid-primary">
         <Macro label="Calories" value={n.calories} unit="" />
         <Macro label="Protein" value={n.protein} unit="g" />
         <Macro label="Carbs" value={n.carbs} unit="g" />
         <Macro label="Fat" value={n.fat} unit="g" />
-        <Macro label="Sugar" value={n.sugar} unit="g" />
-        <Macro label="Sodium" value={n.sodium} unit="mg" />
       </div>
+      <details className="nutrition-more">
+        <summary>
+          More nutrition
+          <ChevronDown size={18} />
+        </summary>
+        <div className="macro-grid nutrition-secondary-grid">
+          <Macro label="Serving" value={n.servingSize} unit="" />
+          <Macro label="Sugar" value={n.sugar} unit="g" />
+          <Macro label="Sodium" value={n.sodium} unit="mg" />
+          <Macro label="Sat. fat" value={n.saturatedFat} unit="g" />
+          <Macro label="Fiber" value={n.fiber} unit="g" />
+        </div>
+      </details>
       <button className="primary-button full" onClick={() => onAddToDailyLog(product)} disabled={!canLog}>
         <Plus size={18} />
         {canLog ? "Add to Daily Log" : "Calories missing"}
       </button>
-      <div className="daily-log">
-        <div className="daily-ring">
-          <Target size={24} />
-          <strong>2,200</strong>
-          <span>goal</span>
-        </div>
-        <div className="daily-copy">
-          <div className="calorie-line">
-            <span>Eaten</span>
-            <strong>{dailyTotals.calories.toLocaleString()}</strong>
-          </div>
-          <div className="calorie-line">
-            <span>Remaining</span>
-            <strong>{remaining.toLocaleString()}</strong>
-          </div>
-          <div className="mini-progress">
-            <span style={{ width: `${clamp((dailyTotals.calories / 2200) * 100, 0, 100)}%` }} />
-          </div>
-          <small>
-            Protein {dailyTotals.protein}g/140g | Carbs {dailyTotals.carbs}g | Fat {dailyTotals.fat}g
-          </small>
-        </div>
-      </div>
-      <div className="today-foods">
-        {dailyLog.slice(0, 3).map((food) => (
-          <div key={food.id}>
-            <span>{food.name}</span>
-            <strong>{food.calories} calories</strong>
-          </div>
-        ))}
-      </div>
     </section>
   );
 }
@@ -3617,15 +3721,15 @@ function TakeAction({
   copied,
   setCopied
 }) {
-  if (product.category === "medicine") return null;
+  if (product.category === "medicine" || product.analysisPending) return null;
   const message = buildActionMessage(product, flaggedIngredients, platform, tone);
   return (
     <section className="card take-action">
       <button className="take-action-toggle" onClick={() => setOpen(!open)}>
         <div>
-          <span className="eyebrow">Phase 2</span>
-          <h2>Take Action</h2>
-          <p>Concerned about these ingredients? Ask the brand to improve this product.</p>
+          <span className="eyebrow">Optional</span>
+          <h2>Brand feedback</h2>
+          <p>Create a respectful note about flagged ingredients.</p>
         </div>
         {open ? <ChevronDown size={22} /> : <ChevronRight size={22} />}
       </button>
@@ -3694,8 +3798,11 @@ function buildActionMessage(product, flaggedIngredients, platform, tone) {
   return `@${product.brand.replace(/\s/g, "")} I like this product, but I'm concerned about the use of ${ingredients}. Would you consider reformulating this with safer alternatives?`;
 }
 
-function RecommendationsScreen({ productIndex, realProducts, onOpenProduct }) {
-  const realPairs = realProducts
+function RecommendationsScreen({ productIndex, history, onOpenProduct }) {
+  const scannedProducts = history
+    .map((item) => productIndex.get(item.productId))
+    .filter((product) => product && ["food-provider", "barcode-provider"].includes(product.sourceType));
+  const realPairs = scannedProducts
     .map((product) => {
       const alternative = (product.alternatives || []).map((id) => productIndex.get(id)).find(Boolean);
       return alternative ? { bad: product, good: alternative, key: `${product.id}-${alternative.id}` } : null;
@@ -3727,14 +3834,11 @@ function RecommendationsScreen({ productIndex, realProducts, onOpenProduct }) {
           ))}
         </section>
       )}
-      {samplePairs.length ? (
-        <section className="stack small-gap">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">Optional demo data</span>
-              <h2>Try sample swaps</h2>
-            </div>
-          </div>
+      {!realPairs.length && (
+        <EmptyState title="No recommendations yet" copy="Scan a product to compare it with a better fit." />
+      )}
+      {samplePairs.length > 0 && (
+        <SampleDisclosure title="Try sample swaps">
           {samplePairs.map(({ bad, good, key }) => (
             <section className="comparison-card" key={key}>
               <RecommendationTile product={bad} icon="bad" role="bad" onOpenProduct={onOpenProduct} />
@@ -3744,9 +3848,7 @@ function RecommendationsScreen({ productIndex, realProducts, onOpenProduct }) {
               <RecommendationTile product={good} icon="good" role="good" onOpenProduct={onOpenProduct} />
             </section>
           ))}
-        </section>
-      ) : (
-        <EmptyState title="No recommendations yet" copy="Scan a product to compare it with cleaner alternatives." />
+        </SampleDisclosure>
       )}
     </div>
   );
@@ -3768,11 +3870,19 @@ function RecommendationTile({ product, icon, role, onOpenProduct }) {
 function HistoryScreen({ history, productIndex, onOpenProduct }) {
   const today = history.filter((item) => item.date.startsWith("Today"));
   const yesterday = history.filter((item) => item.date.startsWith("Yesterday"));
+  const earlier = history.filter((item) => !item.date.startsWith("Today") && !item.date.startsWith("Yesterday"));
   return (
     <div className="stack">
       <Header eyebrow="History" title="Recently scanned" />
-      <HistoryGroup title="Today" items={today} productIndex={productIndex} onOpenProduct={onOpenProduct} />
-      <HistoryGroup title="Yesterday" items={yesterday} productIndex={productIndex} onOpenProduct={onOpenProduct} />
+      {!history.length ? (
+        <EmptyState title="No scans yet" copy="Products you scan will appear here with their image and result." />
+      ) : (
+        <>
+          {today.length > 0 && <HistoryGroup title="Today" items={today} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
+          {yesterday.length > 0 && <HistoryGroup title="Yesterday" items={yesterday} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
+          {earlier.length > 0 && <HistoryGroup title="Earlier" items={earlier} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
+        </>
+      )}
     </div>
   );
 }
@@ -3783,22 +3893,18 @@ function HistoryGroup({ title, items, productIndex, onOpenProduct }) {
       <div className="section-heading">
         <h2>{title}</h2>
       </div>
-      {items.length ? (
-        items.map((item) => {
-          const product = productIndex.get(item.productId);
-          if (!product) return null;
-          return (
-            <ProductListCard
-              key={item.id}
-              product={product}
-              meta={item.date}
-              onClick={() => onOpenProduct(product.id)}
-            />
-          );
-        })
-      ) : (
-        <EmptyState title="No history yet" copy="Scanned products will appear here by date." compact />
-      )}
+      {items.map((item) => {
+        const product = productIndex.get(item.productId);
+        if (!product) return null;
+        return (
+          <ProductListCard
+            key={item.id}
+            product={product}
+            meta={item.date}
+            onClick={() => onOpenProduct(product.id)}
+          />
+        );
+      })}
     </section>
   );
 }
@@ -3879,7 +3985,7 @@ function ProductListCard({ product, onClick, meta }) {
           <small>{product.brand}</small>
           <span className="history-status">
             <i className={product.analysisPending || product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)} />
-            {product.analysisPending ? "Needs Label" : product.category === "medicine" || product.category === "textile" ? product.summaryStatus || product.rating : product.rating}
+            {product.analysisPending ? "Needs Label" : product.category === "medicine" || product.category === "textile" ? product.summaryStatus || product.rating : `${product.score}/100 ${product.rating}`}
           </span>
           <span className="history-date">{meta}</span>
         </div>
@@ -4077,4 +4183,7 @@ function InfoBlock({ label, value }) {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+const rootElement = document.getElementById("root");
+const root = globalThis.__ziyaReactRoot || createRoot(rootElement);
+globalThis.__ziyaReactRoot = root;
+root.render(<App />);
