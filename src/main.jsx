@@ -2766,7 +2766,7 @@ function ScanScreen({
     await scanner.start(
       { facingMode: useIdealConstraints ? { ideal: "environment" } : "environment" },
       {
-        fps: 10,
+        fps: 6,
         qrbox,
         aspectRatio: 16 / 9,
         disableFlip: true,
@@ -2829,7 +2829,7 @@ function ScanScreen({
       const { BrowserMultiFormatOneDReader } = await import("@zxing/browser");
       if (!videoRef.current || !streamRef.current || scanResolvedRef.current) return false;
       const reader = new BrowserMultiFormatOneDReader(undefined, {
-        delayBetweenScanAttempts: 100,
+        delayBetweenScanAttempts: 160,
         delayBetweenScanSuccess: 1200
       });
       zxingReaderRef.current = reader;
@@ -2862,7 +2862,7 @@ function ScanScreen({
             }
           }
         }
-        zxingTimerRef.current = window.setTimeout(scanFrame, 100);
+        zxingTimerRef.current = window.setTimeout(scanFrame, 160);
       };
       scanFrame();
       setCameraMessage("Camera active - scan barcode or enter it manually.");
