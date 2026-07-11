@@ -79,6 +79,13 @@ const categoryMeta = {
     icon: ShoppingBag,
     accent: "#8b7448",
     tone: "gold"
+  },
+  unknown: {
+    label: "Product",
+    shortLabel: "Product",
+    icon: ShoppingBag,
+    accent: "#6b7771",
+    tone: "gray"
   }
 };
 
@@ -1045,9 +1052,20 @@ async function lookupProductByBarcode(rawBarcode, { catalog = products } = {}) {
 
   const generalBarcodeResult = await lookupUpcItemDbProduct(barcode);
   if (generalBarcodeResult.product) {
-    const product = realFoodResult.product
-      ? mergeFoodProductWithBarcodeIdentity(realFoodResult.product, generalBarcodeResult.product)
-      : generalBarcodeResult.product;
+    const foodProduct = realFoodResult.product;
+    const identityProduct = generalBarcodeResult.product;
+    let product = identityProduct;
+    if (foodProduct?.category === "food" && ["food", "unknown"].includes(identityProduct.category)) {
+      product = mergeFoodProductWithBarcodeIdentity(foodProduct, identityProduct);
+    } else if (foodProduct) {
+      product = {
+        ...identityProduct,
+        name: identityProduct.name || foodProduct.name,
+        brand: identityProduct.brand === "Unknown brand" ? foodProduct.brand : identityProduct.brand,
+        image: identityProduct.image || foodProduct.image,
+        category: identityProduct.category === "unknown" ? foodProduct.category : identityProduct.category
+      };
+    }
     return {
       status: "found",
       barcode,
@@ -1191,12 +1209,33 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
   const image = pickOpenFoodFactsImage(rawProduct);
   const ingredients = mapOpenFoodFactsIngredients(rawProduct);
   const nutrition = mapOpenFoodFactsNutrition(rawProduct);
+  const categoryPath = cleanText(rawProduct.categories || asArray(rawProduct.categories_tags).join(" "));
+  const inferredCategory = inferCategoryFromProductText([name, brand, categoryPath, ingredients.slice(0, 6).map((item) => item.name).join(" ")].join(" "));
+  const hasFoodEvidence = inferredCategory === "food" || ingredients.length > 0 || hasCoreFoodNutrition(nutrition);
+  if (!["food", "unknown"].includes(inferredCategory) || (inferredCategory === "unknown" && !hasFoodEvidence)) {
+    return createPartialIdentityProduct({
+      id: `food-${barcode}`,
+      barcode,
+      name,
+      brand,
+      category: inferredCategory === "unknown" ? "unknown" : inferredCategory,
+      image,
+      description: cleanText(rawProduct.generic_name),
+      categoryPath,
+      sourceType: "food-provider"
+    });
+  }
+
   const processing = mapOpenFoodFactsProcessing(rawProduct.nova_group);
   const counts = getRiskCounts(ingredients);
   const nutritionFlags = getNutritionFlags(nutrition);
   const additivesCount = toNumber(rawProduct.additives_n);
   const hasAdditives = additivesCount > 0 || asArray(rawProduct.additives_tags).length > 0 || asArray(rawProduct.additives_original_tags).length > 0;
+  const hasAdditiveData = rawProduct.additives_n !== undefined || asArray(rawProduct.additives_tags).length > 0 || asArray(rawProduct.additives_original_tags).length > 0;
   const allergens = formatAllergens(rawProduct.allergens || asArray(rawProduct.allergens_tags).join(", "));
+  const hasIngredients = ingredients.length > 0;
+  const hasNutrition = hasCoreFoodNutrition(nutrition);
+  const analysisReady = hasIngredients && hasNutrition;
   const concerns = [
     ...(hasAdditives ? ["Additives listed"] : []),
     ...nutritionFlags.concerns,
@@ -1223,6 +1262,14 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
     sourceType: "food-provider",
     dataConfidence: getOpenFoodFactsConfidence({ image, ingredients, nutrition }),
     nutritionConfidence: getNutritionConfidence(nutrition),
+    fieldConfidence: {
+      identity: name && brand !== "Unknown brand" ? "Verified" : "Partial",
+      image: image ? "Verified" : "Missing",
+      ingredients: hasIngredients ? "Verified" : "Missing",
+      nutrition: hasNutrition ? "Verified" : "Missing",
+      additives: hasAdditiveData ? "Verified" : "Missing",
+      allergens: allergens ? "Verified" : "Missing"
+    },
     processing,
     allergens,
     additives: {
@@ -1235,6 +1282,30 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
     nutrition,
     alternatives: ["skinny-pop", "protein-bar", "peanut-butter"]
   };
+
+  if (!analysisReady) {
+    const missing = [
+      ...(!hasIngredients ? ["Ingredient list needed"] : []),
+      ...(!hasNutrition ? ["Nutrition label needed"] : [])
+    ];
+    return {
+      ...baseProduct,
+      score: null,
+      scoring: null,
+      analysisPending: true,
+      summaryStatus: "Needs label",
+      rating: "Partial match",
+      concerns: [...new Set([...missing, ...concerns])].slice(0, 5),
+      positives: image ? ["Product image found"] : ["Product identity found"],
+      breakdown: [
+        { label: "Product", value: "Found", detail: "Name and brand matched" },
+        { label: "Ingredients", value: hasIngredients ? "Available" : "Missing", detail: hasIngredients ? "Ready to review" : "Add the ingredient label" },
+        { label: "Nutrition", value: hasNutrition ? "Available" : "Missing", detail: hasNutrition ? "Core values returned" : "Add nutrition facts" },
+        { label: "Category", value: "Food", detail: categoryPath || "Food catalog match" }
+      ]
+    };
+  }
+
   const scoring = scoreFoodProduct(baseProduct);
   return {
     ...baseProduct,
@@ -1362,10 +1433,14 @@ function mapOpenFoodFactsProcessing(novaGroup) {
   return "Unknown";
 }
 
+function hasCoreFoodNutrition(nutrition = {}) {
+  return hasNumber(nutrition.calories) && [nutrition.protein, nutrition.carbs, nutrition.fat].some(hasNumber);
+}
+
 function getOpenFoodFactsConfidence({ image, ingredients, nutrition }) {
   const hasImage = Boolean(image);
   const hasIngredients = ingredients.length > 0;
-  const hasNutrition = [nutrition.calories, nutrition.protein, nutrition.carbs, nutrition.fat].some(hasNumber);
+  const hasNutrition = hasCoreFoodNutrition(nutrition);
   return hasImage && hasIngredients && hasNutrition ? "Verified" : "Partial";
 }
 
@@ -1409,6 +1484,7 @@ function getRatingFromScore(score) {
 
 function isCompleteFoodProduct(product) {
   return Boolean(
+    product?.category === "food" &&
     product?.name &&
     !product.name.startsWith("Food product") &&
     product.brand &&
@@ -1442,7 +1518,7 @@ function normalizeUpcItemDbProduct(item, barcode) {
   const categoryPath = cleanText(item.category);
   const category = inferCategoryFromProductText([name, brand, categoryPath, item.description].join(" "));
   const image = asArray(item.images).find(Boolean) || "";
-  const product = {
+  return createPartialIdentityProduct({
     id: `upc-${normalizeBarcode(item.ean || item.upc || item.gtin || barcode)}`,
     barcode: normalizeBarcode(item.ean || item.upc || item.gtin || barcode),
     name,
@@ -1450,28 +1526,67 @@ function normalizeUpcItemDbProduct(item, barcode) {
     category,
     image,
     sourceType: "barcode-provider",
-    dataConfidence: "Partial",
     description: cleanText(item.description),
+    categoryPath
+  });
+}
+
+function createPartialIdentityProduct({
+  id,
+  barcode,
+  name,
+  brand,
+  category = "unknown",
+  image = "",
+  sourceType,
+  description = "",
+  categoryPath = ""
+}) {
+  const resolvedCategory = categoryMeta[category] ? category : "unknown";
+  const product = {
+    id,
+    barcode,
+    name,
+    brand,
+    category: resolvedCategory,
+    image,
+    sourceType,
+    dataConfidence: "Partial",
+    description,
     analysisPending: true,
-    summaryStatus: "Scan label to score",
+    summaryStatus: "Needs label",
     rating: "Partial match",
     concerns: ["Scan or paste the label to complete analysis"],
     positives: ["Product identity found"],
     ingredients: [],
+    fieldConfidence: {
+      identity: name && brand !== "Unknown brand" ? "Verified" : "Partial",
+      image: image ? "Verified" : "Missing",
+      ingredients: "Missing",
+      nutrition: "Missing",
+      additives: "Missing",
+      allergens: "Missing"
+    },
     breakdown: [
       { label: "Product", value: "Found", detail: "Identity and image matched" },
       { label: "Label", value: "Needed", detail: "Ingredients and nutrition not returned" },
       { label: "Confidence", value: "Partial", detail: "Complete by scanning the label" },
-      { label: "Category", value: categoryMeta[category]?.shortLabel || "Product", detail: categoryPath || "General barcode match" }
+      { label: "Category", value: categoryMeta[resolvedCategory]?.shortLabel || "Product", detail: categoryPath || "Category not confirmed" }
     ],
     alternatives: []
   };
 
-  if (category === "medicine") {
+  if (resolvedCategory === "medicine") {
     return {
       ...product,
+      fieldConfidence: {
+        ...product.fieldConfidence,
+        activeIngredient: "Missing",
+        warnings: "Missing",
+        inactiveIngredients: "Missing"
+      },
       rating: "Label Summary",
-      summaryStatus: "Not Health Scored",
+      summaryStatus: "Needs medicine label",
       activeIngredient: "Scan label to confirm",
       purpose: "Review product label",
       warnings: ["Scan or paste the label to complete analysis", "Follow the product label", "Ask a doctor or pharmacist if unsure"],
@@ -1479,9 +1594,14 @@ function normalizeUpcItemDbProduct(item, barcode) {
     };
   }
 
-  if (category === "textile") {
+  if (resolvedCategory === "textile") {
     return {
       ...product,
+      fieldConfidence: {
+        ...product.fieldConfidence,
+        materials: "Missing",
+        care: "Missing"
+      },
       rating: "Material Summary",
       summaryStatus: "Scan label to confirm",
       materialSummary: "Material label needed",
@@ -1493,9 +1613,13 @@ function normalizeUpcItemDbProduct(item, barcode) {
     };
   }
 
-  if (category === "household") {
+  if (resolvedCategory === "household") {
     return {
       ...product,
+      fieldConfidence: {
+        ...product.fieldConfidence,
+        cautions: "Missing"
+      },
       safetyNotes: ["Scan or paste the label to complete analysis", "Review the product label before use"]
     };
   }
@@ -1504,12 +1628,14 @@ function normalizeUpcItemDbProduct(item, barcode) {
 }
 
 function inferCategoryFromProductText(value) {
-  const lower = value.toLowerCase();
-  if (/(medicine|drug|ibuprofen|acetaminophen|vitamin|supplement|cough|allergy|pain reliever|otc)/.test(lower)) return "medicine";
-  if (/(shirt|towel|fabric|textile|cotton|polyester|nylon|spandex|apparel|clothing)/.test(lower)) return "textile";
-  if (/(detergent|cleaner|laundry|dish soap|soap|disinfect|freshener|household|fabric softener|spray)/.test(lower)) return "household";
-  if (/(shampoo|conditioner|lotion|deodorant|cosmetic|sunscreen|toothpaste|skin|beauty|body wash|scrub)/.test(lower)) return "beauty";
-  return "food";
+  const lower = cleanText(value).toLowerCase();
+  if (!lower) return "unknown";
+  if (/(medicine|drug facts|ibuprofen|acetaminophen|naproxen|antihistamine|supplement facts|vitamin supplement|cough syrup|allergy relief|pain reliever|fever reducer|otc medicine)/.test(lower)) return "medicine";
+  if (/(shirt|towel|fabric|textile|cotton|polyester|nylon|spandex|apparel|clothing|garment|bedding)/.test(lower)) return "textile";
+  if (/(laundry detergent|dish soap|dishwashing|all-purpose cleaner|surface cleaner|glass cleaner|disinfect|bleach|ammonia|air freshener|fabric softener|cleaning wipes|household cleaner|surfactant|hypochlorite)/.test(lower)) return "household";
+  if (/(shampoo|conditioner|lotion|deodorant|cosmetic|sunscreen|toothpaste|skin care|skincare|beauty|body wash|face wash|moisturizer|makeup|hand soap|bar soap|body scrub|personal care|parfum|fragrance|glycerin|sulfate)/.test(lower)) return "beauty";
+  if (/(food|snack|cereal|popcorn|peanut butter|ice cream|chips|cracker|cookie|candy|chocolate|cocoa|wheat flour|corn syrup|milk powder|vegetable oil|soda|juice|beverage|drink|sauce|spread|dessert|dairy|confectionery|bakery|bread|pasta|rice|condiment|frozen meal|protein bar|nutrition bar|grocery)/.test(lower)) return "food";
+  return "unknown";
 }
 
 function clamp(value, min, max) {
@@ -1697,19 +1823,17 @@ function createManualReport({
   nutritionConfidence,
   confidence = "Manual Review"
 }) {
-  const normalized = text
+  const normalized = String(text || "")
     .split(/[,;\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
-  const guessedIngredients = normalized.length
-    ? normalized
-    : ["Water", "Fragrance", "Salt", "Artificial flavor"];
-  const ingredients = guessedIngredients.map((name) => {
+  const ingredients = normalized.map((name) => {
     const risk = classifyIngredientRisk(name);
     return { name, risk, type: selectedTypeForIngredient(name, risk) };
   });
 
   const selectedCategory = category === "not-sure" ? inferCategory(ingredients) : category;
+  const hasNutrition = selectedCategory === "food" && hasCoreFoodNutrition(nutrition);
   const baseProduct = {
     id: `manual-${Date.now()}`,
     name: productName,
@@ -1718,6 +1842,14 @@ function createManualReport({
     userPhoto,
     image: undefined,
     dataConfidence: confidence,
+    fieldConfidence: {
+      identity: "Manual Review",
+      image: userPhoto ? "Manual Review" : "Missing",
+      ingredients: ingredients.length ? "Manual Review" : "Missing",
+      nutrition: hasNutrition ? "Manual Review" : "Missing",
+      additives: "Manual Review",
+      allergens: "Missing"
+    },
     rating: "Quick Analysis",
     positives: ["Manual fallback used", "Ingredient risks grouped simply"],
     concerns: buildManualConcerns(ingredients, selectedCategory),
@@ -1725,8 +1857,8 @@ function createManualReport({
     breakdown: buildManualBreakdown(ingredients, selectedCategory),
     alternatives: selectedCategory === "medicine" ? [] : ["skinny-pop", "lotion", "free-detergent"],
     processing: selectedCategory === "food" ? "Unknown" : undefined,
-    nutrition: selectedCategory === "food" ? nutrition || estimateNutritionFromIngredients(ingredients) : undefined,
-    nutritionConfidence: selectedCategory === "food" ? nutritionConfidence || (nutrition ? "Manual Review" : "Estimated") : undefined,
+    nutrition: selectedCategory === "food" ? nutrition : undefined,
+    nutritionConfidence: selectedCategory === "food" ? nutritionConfidence || (hasNutrition ? "Manual Review" : "Partial") : undefined,
     safetyNotes:
       selectedCategory === "household"
         ? ["Review the product label before use", "Avoid eye contact", "Keep away from children and pets"]
@@ -1773,6 +1905,21 @@ function createManualReport({
     };
   }
 
+  if (selectedCategory === "unknown" || (selectedCategory === "food" && !hasNutrition)) {
+    return {
+      ...baseProduct,
+      score: null,
+      analysisPending: true,
+      summaryStatus: "Needs label",
+      rating: "Partial match",
+      concerns: [
+        ...(selectedCategory === "food" ? ["Nutrition label needed"] : ["Product category needs confirmation"]),
+        ...baseProduct.concerns
+      ].slice(0, 4),
+      positives: ingredients.length ? ["Ingredient list added"] : ["Manual review started"]
+    };
+  }
+
   const score =
     selectedCategory === "food"
       ? scoreFoodProduct(baseProduct).total
@@ -1787,6 +1934,46 @@ function createManualReport({
   };
 }
 
+function mergeProductLabelCompletion(product, completed) {
+  if (!product) return completed;
+  const category = completed.category === "unknown" && product.category !== "unknown" ? product.category : completed.category;
+  const fieldConfidence = {
+    ...(product.fieldConfidence || {}),
+    ...(completed.fieldConfidence || {}),
+    identity: product.fieldConfidence?.identity || "Verified",
+    image: completed.userPhoto ? "Manual Review" : product.fieldConfidence?.image || (product.image ? "Verified" : "Missing")
+  };
+
+  if (category === "medicine") {
+    fieldConfidence.activeIngredient = completed.activeIngredient ? "Manual Review" : "Missing";
+    fieldConfidence.warnings = completed.warnings?.length ? "Manual Review" : "Missing";
+    fieldConfidence.inactiveIngredients = completed.inactiveIngredients?.length ? "Manual Review" : "Missing";
+  }
+  if (category === "textile") {
+    fieldConfidence.materials = (completed.materials?.length || completed.ingredients?.length) ? "Manual Review" : "Missing";
+    fieldConfidence.care = completed.treatmentNotes ? "Manual Review" : "Missing";
+  }
+  if (category === "household") {
+    fieldConfidence.cautions = completed.safetyNotes?.length ? "Manual Review" : "Missing";
+  }
+
+  return {
+    ...product,
+    ...completed,
+    id: product.id,
+    barcode: product.barcode,
+    name: product.name,
+    brand: product.brand,
+    category,
+    image: product.image,
+    userPhoto: completed.userPhoto || product.userPhoto,
+    description: product.description,
+    sourceType: product.sourceType,
+    dataConfidence: "Manual Review",
+    fieldConfidence
+  };
+}
+
 function selectedTypeForIngredient(name, risk) {
   const lower = name.toLowerCase();
   if (lower.includes("cotton")) return "Natural fiber";
@@ -1794,28 +1981,13 @@ function selectedTypeForIngredient(name, risk) {
   return risk === "safe" ? "Ingredient" : "Flagged ingredient";
 }
 
-function estimateNutritionFromIngredients(ingredients) {
-  const joined = ingredients.map((ingredient) => ingredient.name.toLowerCase()).join(" ");
-  if (joined.includes("peanut")) {
-    return { calories: 190, protein: 8, carbs: 7, fat: 16, sugar: 1, sodium: 65, saturatedFat: 2, fiber: 3 };
-  }
-  if (joined.includes("protein")) {
-    return { calories: 220, protein: 20, carbs: 22, fat: 8, sugar: 3, sodium: 180, saturatedFat: 2, fiber: 8 };
-  }
-  return { calories: 160, protein: 3, carbs: 22, fat: 7, sugar: 4, sodium: 170, saturatedFat: 1, fiber: 2 };
-}
-
 function inferCategory(ingredients) {
-  const joined = ingredients.map((ingredient) => ingredient.name.toLowerCase()).join(" ");
-  if (joined.includes("ibuprofen") || joined.includes("acetaminophen") || joined.includes("cetirizine")) return "medicine";
-  if (joined.includes("cotton") || joined.includes("polyester") || joined.includes("nylon") || joined.includes("spandex")) return "textile";
-  if (joined.includes("surfactant") || joined.includes("hypochlorite") || joined.includes("detergent")) return "household";
-  if (joined.includes("fragrance") || joined.includes("glycerin") || joined.includes("sulfate")) return "beauty";
-  return "food";
+  return inferCategoryFromProductText(ingredients.map((ingredient) => ingredient.name).join(" "));
 }
 
 function buildManualConcerns(ingredients, category) {
   const counts = getRiskCounts(ingredients);
+  if (category === "unknown") return ["Category not confirmed", `${counts.moderate + counts.harmful} flagged ingredients`, "Add the product label"];
   if (category === "medicine") return ["Review active ingredient", "Check duplicate ingredients", "Follow dosage label"];
   if (category === "textile") return ["Material blend", `${counts.moderate + counts.harmful} material notes`, "Wash before use"];
   if (category === "household") return ["Chemical caution", `${counts.moderate + counts.harmful} flagged ingredients`, "Review warning label"];
@@ -1825,6 +1997,13 @@ function buildManualConcerns(ingredients, category) {
 
 function buildManualBreakdown(ingredients, category) {
   const counts = getRiskCounts(ingredients);
+  if (category === "unknown") {
+    return [
+      { label: "Ingredients", value: `${ingredients.length}`, detail: "Entered manually" },
+      { label: "Category", value: "Unknown", detail: "Confirm the product type" },
+      { label: "Label", value: "Needed", detail: "Add category-specific details" }
+    ];
+  }
   if (category === "medicine") {
     return [
       { label: "Active ingredient", value: ingredients[0]?.name || "Review label", detail: "Manual label summary" },
@@ -1902,6 +2081,46 @@ function createOcrDraft(category, mode) {
   };
 }
 
+function createBlankLabelDraft(category, mode, product) {
+  const base = {
+    category,
+    mode,
+    productName: product?.name || "",
+    brand: product?.brand === "Unknown brand" ? "" : product?.brand || "",
+    text: "",
+    ingredientsText: "",
+    confidence: "Manual Review",
+    nutritionEstimated: false
+  };
+
+  if (category === "food") {
+    return {
+      ...base,
+      nutrition: {
+        servingSize: "",
+        calories: "",
+        protein: "",
+        carbs: "",
+        fat: "",
+        sugar: "",
+        sodium: "",
+        saturatedFat: "",
+        fiber: ""
+      }
+    };
+  }
+
+  if (category === "medicine") {
+    return { ...base, activeIngredient: "", purpose: "", warningsText: "" };
+  }
+
+  if (category === "textile") {
+    return { ...base, materialsText: "", careText: "" };
+  }
+
+  return { ...base, warningsText: "" };
+}
+
 function createReportFromOcr(review, capturedPhoto) {
   const nutrition = review.category === "food" ? normalizeNutrition(review.nutrition) : undefined;
   const labelText =
@@ -1912,7 +2131,7 @@ function createReportFromOcr(review, capturedPhoto) {
     text: labelText,
     category: review.category,
     userPhoto: capturedPhoto,
-    productName: review.productName || "Demo Label Analysis",
+    productName: review.productName || "Label Analysis",
     brand: review.brand || "Scanned product",
     nutrition,
     nutritionConfidence: review.nutritionEstimated ? "Estimated" : "Manual Review",
@@ -1955,15 +2174,15 @@ function createReportFromOcr(review, capturedPhoto) {
 
 function normalizeNutrition(nutrition = {}) {
   return {
-    servingSize: nutrition.servingSize || "Review label",
-    calories: Number(nutrition.calories) || 0,
-    protein: Number(nutrition.protein) || 0,
-    carbs: Number(nutrition.carbs) || 0,
-    fat: Number(nutrition.fat) || 0,
-    sugar: Number(nutrition.sugar) || 0,
-    sodium: Number(nutrition.sodium) || 0,
-    saturatedFat: Number(nutrition.saturatedFat) || 0,
-    fiber: Number(nutrition.fiber) || 0
+    servingSize: nutrition.servingSize || "Not available",
+    calories: toNumber(nutrition.calories),
+    protein: toNumber(nutrition.protein),
+    carbs: toNumber(nutrition.carbs),
+    fat: toNumber(nutrition.fat),
+    sugar: toNumber(nutrition.sugar),
+    sodium: toNumber(nutrition.sodium),
+    saturatedFat: toNumber(nutrition.saturatedFat),
+    fiber: toNumber(nutrition.fiber)
   };
 }
 
@@ -2318,14 +2537,19 @@ function ScanScreen({
   const [sheetState, setSheetState] = useState("peek");
   const [sheetProduct, setSheetProduct] = useState(null);
   const [activeFallback, setActiveFallback] = useState(null);
+  const [labelPhoto, setLabelPhoto] = useState("");
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const detectorRef = useRef(null);
+  const zxingReaderRef = useRef(null);
+  const zxingControlsRef = useRef(null);
   const scanFrameRef = useRef(null);
   const detectionTimerRef = useRef(null);
+  const nativeFallbackTimerRef = useRef(null);
   const cameraTimerRef = useRef(null);
   const cameraRequestRef = useRef(0);
   const scanResolvedRef = useRef(false);
+  const lastDecodedRef = useRef({ value: "", at: 0 });
   const dragStartY = useRef(null);
 
   const sheetProductIndex = useMemo(() => {
@@ -2334,7 +2558,7 @@ function ScanScreen({
     return map;
   }, [productIndex, sheetProduct]);
 
-  function pauseDetection() {
+  function stopNativeDetection() {
     if (scanFrameRef.current) {
       window.cancelAnimationFrame(scanFrameRef.current);
       scanFrameRef.current = null;
@@ -2344,6 +2568,25 @@ function ScanScreen({
       detectionTimerRef.current = null;
     }
     detectorRef.current = null;
+  }
+
+  function stopZxingDetection() {
+    try {
+      zxingControlsRef.current?.stop?.();
+    } catch {
+      // The camera stream is owned by Ziya and is released separately.
+    }
+    zxingControlsRef.current = null;
+    zxingReaderRef.current = null;
+  }
+
+  function pauseDetection() {
+    stopNativeDetection();
+    stopZxingDetection();
+    if (nativeFallbackTimerRef.current) {
+      window.clearTimeout(nativeFallbackTimerRef.current);
+      nativeFallbackTimerRef.current = null;
+    }
   }
 
   function releaseCamera() {
@@ -2364,11 +2607,58 @@ function ScanScreen({
     return () => releaseCamera();
   }, []);
 
-  async function startNativeDetection() {
-    if (!("BarcodeDetector" in window)) {
+  useEffect(() => {
+    if (activeFallback !== "photo" || !capturedPhoto || !sheetProduct || sheetProduct.userPhoto === capturedPhoto) return;
+    const updatedProduct = {
+      ...sheetProduct,
+      userPhoto: capturedPhoto,
+      fieldConfidence: {
+        ...(sheetProduct.fieldConfidence || {}),
+        image: "Manual Review"
+      }
+    };
+    setSheetProduct(updatedProduct);
+    setManualProduct(updatedProduct);
+  }, [activeFallback, capturedPhoto, sheetProduct]);
+
+  function handleDecodedBarcode(rawValue) {
+    const decodedValue = normalizeBarcode(rawValue);
+    const now = Date.now();
+    const duplicate = lastDecodedRef.current.value === decodedValue && now - lastDecodedRef.current.at < 3000;
+    if (!decodedValue || scanResolvedRef.current || duplicate) return;
+
+    scanResolvedRef.current = true;
+    lastDecodedRef.current = { value: decodedValue, at: now };
+    setBarcode(decodedValue);
+    pauseDetection();
+    void runBarcodeLookup(decodedValue);
+  }
+
+  async function startZxingDetection() {
+    if (!videoRef.current || !streamRef.current || scanResolvedRef.current || zxingControlsRef.current) return false;
+    try {
+      const { BrowserMultiFormatOneDReader } = await import("@zxing/browser");
+      if (!videoRef.current || !streamRef.current || scanResolvedRef.current) return false;
+
+      const reader = new BrowserMultiFormatOneDReader(undefined, {
+        delayBetweenScanAttempts: 220,
+        delayBetweenScanSuccess: 1200
+      });
+      zxingReaderRef.current = reader;
+      zxingControlsRef.current = reader.scan(videoRef.current, (result) => {
+        if (result) handleDecodedBarcode(result.getText());
+      });
+      setCameraMessage("Camera active - scanning automatically.");
+      return true;
+    } catch {
+      stopZxingDetection();
       setCameraMessage("Camera active - enter barcode manually if needed.");
-      return;
+      return false;
     }
+  }
+
+  async function startNativeDetection() {
+    if (!("BarcodeDetector" in window)) return false;
 
     try {
       const Detector = window.BarcodeDetector;
@@ -2380,14 +2670,10 @@ function ScanScreen({
       const formats = supportedFormats.length
         ? wantedFormats.filter((format) => supportedFormats.includes(format))
         : wantedFormats;
-      try {
-        detectorRef.current = new Detector(formats.length ? { formats } : undefined);
-      } catch {
-        detectorRef.current = new Detector();
-      }
+      detectorRef.current = new Detector(formats.length ? { formats } : undefined);
     } catch {
-      setCameraMessage("Camera active - enter barcode manually if needed.");
-      return;
+      detectorRef.current = null;
+      return false;
     }
 
     const scheduleDetection = (detectFrame) => {
@@ -2403,22 +2689,33 @@ function ScanScreen({
           const codes = await detectorRef.current.detect(videoRef.current);
           const detectedValue = codes?.[0]?.rawValue;
           if (detectedValue) {
-            scanResolvedRef.current = true;
-            setBarcode(detectedValue);
-            pauseDetection();
-            runBarcodeLookup(detectedValue);
+            handleDecodedBarcode(detectedValue);
             return;
           }
         }
       } catch {
-        setCameraMessage("Camera active - enter barcode manually if needed.");
-        pauseDetection();
+        stopNativeDetection();
+        void startZxingDetection();
         return;
       }
       scheduleDetection(detectFrame);
     };
 
+    setCameraMessage("Camera active - scanning automatically.");
     scanFrameRef.current = window.requestAnimationFrame(detectFrame);
+    nativeFallbackTimerRef.current = window.setTimeout(() => {
+      nativeFallbackTimerRef.current = null;
+      if (!scanResolvedRef.current && streamRef.current) {
+        stopNativeDetection();
+        void startZxingDetection();
+      }
+    }, 3200);
+    return true;
+  }
+
+  async function startBarcodeDetection() {
+    const nativeStarted = await startNativeDetection();
+    if (!nativeStarted) await startZxingDetection();
   }
 
   async function startCamera() {
@@ -2468,7 +2765,7 @@ function ScanScreen({
       }
       setCameraStatus("active");
       setCameraMessage("");
-      await startNativeDetection();
+      await startBarcodeDetection();
     } catch (error) {
       if (cameraRequestRef.current !== requestId) return;
       if (cameraTimerRef.current) {
@@ -2507,6 +2804,8 @@ function ScanScreen({
   async function runBarcodeLookup(nextBarcode) {
     const lookupValue = normalizeBarcode(nextBarcode ?? barcode);
     setBarcode(lookupValue);
+    scanResolvedRef.current = true;
+    pauseDetection();
     if (!lookupValue) {
       setLookupLoading(false);
       setSheetProduct(null);
@@ -2518,13 +2817,22 @@ function ScanScreen({
     setLookupLoading(true);
     clearBarcodeMiss();
     setSheetProduct(null);
+    if (sheetMode) {
+      setSheetMode("fallback");
+      setSheetState("mid");
+      setActiveFallback("barcode");
+    } else {
+      setCameraMessage("Looking up product...");
+    }
     try {
       const result = await lookupProductByBarcode(lookupValue);
       setLookupLoading(false);
+      setCameraMessage("");
       if (result.status === "found" && result.product) {
         setManualProduct(result.product);
         onRecordHistory(result.product);
         setSheetProduct(result.product);
+        setManualCategory(result.product.category === "unknown" ? "not-sure" : result.product.category);
         setSheetMode("product");
         setSheetState("peek");
         setActiveFallback(null);
@@ -2535,6 +2843,7 @@ function ScanScreen({
       setSheetState("mid");
     } catch {
       setLookupLoading(false);
+      setCameraMessage("");
       setSheetProduct(null);
       setSheetMode("not-found");
       setSheetState("mid");
@@ -2549,8 +2858,9 @@ function ScanScreen({
       window.setTimeout(() => document.getElementById("product-photo")?.click(), 20);
     }
     if (mode === "label") {
-      const category = manualCategory === "not-sure" ? "food" : manualCategory;
-      setOcrReview(createOcrDraft(category, "ingredients"));
+      const productCategory = sheetProduct?.category;
+      const category = productCategory && productCategory !== "unknown" ? productCategory : manualCategory === "not-sure" ? "unknown" : manualCategory;
+      setOcrReview(createBlankLabelDraft(category, "ingredients", sheetProduct));
     }
     if (mode === "paste") {
       window.setTimeout(() => document.getElementById("ingredient-paste")?.focus(), 40);
@@ -2566,7 +2876,16 @@ function ScanScreen({
   }
 
   function analyzeManualInSheet() {
-    const report = createManualReport({ text: manualText, category: manualCategory, userPhoto: capturedPhoto });
+    const completed = createManualReport({
+      text: manualText,
+      category: manualCategory,
+      userPhoto: sheetProduct?.userPhoto || capturedPhoto,
+      productName: sheetProduct?.name,
+      brand: sheetProduct?.brand,
+      nutrition: sheetProduct?.nutrition,
+      nutritionConfidence: sheetProduct?.nutritionConfidence
+    });
+    const report = mergeProductLabelCompletion(sheetProduct, completed);
     setManualProduct(report);
     onRecordHistory(report);
     setSheetProduct(report);
@@ -2578,7 +2897,8 @@ function ScanScreen({
 
   function applyOcrInSheet() {
     if (!ocrReview) return;
-    const report = createReportFromOcr(ocrReview, capturedPhoto);
+    const completed = createReportFromOcr(ocrReview, sheetProduct?.userPhoto || capturedPhoto);
+    const report = mergeProductLabelCompletion(sheetProduct, completed);
     setManualProduct(report);
     onRecordHistory(report);
     setSheetProduct(report);
@@ -2587,6 +2907,32 @@ function ScanScreen({
     setActiveFallback(null);
     setOcrReview(null);
     setExpandedSection(null);
+  }
+
+  function handleLabelPhotoSelected(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setLabelPhoto(String(reader.result || ""));
+    reader.readAsDataURL(file);
+    const productCategory = sheetProduct?.category;
+    const category = productCategory && productCategory !== "unknown" ? productCategory : manualCategory === "not-sure" ? "unknown" : manualCategory;
+    setOcrReview(
+      createBlankLabelDraft(
+        category,
+        category === "food" ? "nutrition" : category === "textile" ? "materials" : "ingredients",
+        sheetProduct
+      )
+    );
+    setActiveFallback("label");
+    setSheetMode("fallback");
+    setSheetState("full");
+  }
+
+  function finishProductPhoto() {
+    if (!sheetProduct || !capturedPhoto) return;
+    setSheetMode("product");
+    setSheetState("full");
+    setActiveFallback(null);
   }
 
   function expandSheet() {
@@ -2664,6 +3010,19 @@ function ScanScreen({
         onChange={(event) => {
           setActiveFallback("photo");
           onPhotoSelected(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+
+      <input
+        id="label-photo"
+        className="visually-hidden"
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={(event) => {
+          handleLabelPhotoSelected(event.target.files?.[0]);
+          event.target.value = "";
         }}
       />
 
@@ -2702,9 +3061,11 @@ function ScanScreen({
         setManualCategory={setManualCategory}
         analyzeManual={analyzeManualInSheet}
         capturedPhoto={capturedPhoto}
+        labelPhoto={labelPhoto}
         ocrReview={ocrReview}
         setOcrReview={setOcrReview}
         applyOcrReview={applyOcrInSheet}
+        finishProductPhoto={finishProductPhoto}
         useSampleProduct={useSampleProduct}
       />
     </div>
@@ -2746,9 +3107,11 @@ function ScannerBottomSheet({
   setManualCategory,
   analyzeManual,
   capturedPhoto,
+  labelPhoto,
   ocrReview,
   setOcrReview,
   applyOcrReview,
+  finishProductPhoto,
   useSampleProduct
 }) {
   if (!mode) return null;
@@ -2769,7 +3132,7 @@ function ScannerBottomSheet({
 
       {isProduct && sheetState !== "full" && (
         <>
-          <ScannerResultBar product={product} />
+          <ScannerResultBar product={product} onExpand={toggleSheet} />
           {sheetState === "mid" && <ScannerMiniDetails product={product} onExpand={() => setSheetState("full")} />}
         </>
       )}
@@ -2794,6 +3157,7 @@ function ScannerBottomSheet({
             setMessageTone={setMessageTone}
             copied={copied}
             setCopied={setCopied}
+            onCompleteLabel={openFallback}
           />
         </div>
       )}
@@ -2814,9 +3178,12 @@ function ScannerBottomSheet({
           setManualCategory={setManualCategory}
           analyzeManual={analyzeManual}
           capturedPhoto={capturedPhoto}
+          labelPhoto={labelPhoto}
           ocrReview={ocrReview}
           setOcrReview={setOcrReview}
           applyOcrReview={applyOcrReview}
+          finishProductPhoto={finishProductPhoto}
+          hasMatchedProduct={Boolean(product)}
           useSampleProduct={useSampleProduct}
         />
       )}
@@ -2837,9 +3204,12 @@ function ScannerBottomSheet({
           setManualCategory={setManualCategory}
           analyzeManual={analyzeManual}
           capturedPhoto={capturedPhoto}
+          labelPhoto={labelPhoto}
           ocrReview={ocrReview}
           setOcrReview={setOcrReview}
           applyOcrReview={applyOcrReview}
+          finishProductPhoto={finishProductPhoto}
+          hasMatchedProduct={Boolean(product)}
           useSampleProduct={useSampleProduct}
         />
       )}
@@ -2847,20 +3217,37 @@ function ScannerBottomSheet({
   );
 }
 
-function ScannerResultBar({ product }) {
+function ScannerResultBar({ product, onExpand }) {
   const isSummary = product.analysisPending || product.category === "medicine" || product.category === "textile";
+  const primaryStatus = product.analysisPending
+    ? "Needs label"
+    : product.category === "medicine"
+      ? "Label summary"
+      : product.category === "textile"
+        ? "Material summary"
+        : `${product.score}/100`;
+  const secondaryStatus = product.analysisPending
+    ? "Partial"
+    : product.category === "medicine"
+      ? "Not health scored"
+      : product.category === "textile"
+        ? product.summaryStatus || product.rating
+        : product.rating;
   return (
-    <div className="scanner-result-bar">
+    <button className="scanner-result-bar" onClick={onExpand} aria-label={`Open report for ${product.name}`}>
       <ProductImage product={product} alt={product.name} />
-      <div>
+      <div className="scanner-result-identity">
         <strong>{product.name}</strong>
         <span>{product.brand}</span>
       </div>
-      <em className={isSummary ? "neutral" : getScoreClass(product.score)}>
-        <strong>{getScoreLabel(product)}</strong>
-        <small>{product.analysisPending ? "Partial" : isSummary ? product.rating : product.rating}</small>
-      </em>
-    </div>
+      <div className={`scanner-result-score ${isSummary ? "neutral" : getScoreClass(product.score)}`}>
+        <i aria-hidden="true" />
+        <div>
+          <strong>{primaryStatus}</strong>
+          <small>{secondaryStatus}</small>
+        </div>
+      </div>
+    </button>
   );
 }
 
@@ -2901,9 +3288,12 @@ function ScannerFallbackSheet({
   setManualCategory,
   analyzeManual,
   capturedPhoto,
+  labelPhoto,
   ocrReview,
   setOcrReview,
   applyOcrReview,
+  finishProductPhoto,
+  hasMatchedProduct,
   useSampleProduct
 }) {
   function handleBarcodeSubmit(event) {
@@ -2917,15 +3307,31 @@ function ScannerFallbackSheet({
         <h2>{title}</h2>
         <p>{copy}</p>
       </div>
-      <div className="fallback-grid">
-        <button onClick={() => openFallback("barcode")}>Manual barcode</button>
-        <button onClick={() => openFallback("paste")}>Paste ingredients</button>
-        <button onClick={() => openFallback("label")}>Scan label</button>
-        <button onClick={useSampleProduct}>Use sample</button>
+      <div className="fallback-tabs" role="tablist" aria-label="Product lookup options">
+        {[
+          ["barcode", "Barcode"],
+          ["label", "Label"],
+          ["paste", "Ingredients"],
+          ["photo", "Photo"]
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={activeFallback === value}
+            className={activeFallback === value ? "active" : ""}
+            onClick={() => openFallback(value)}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {activeFallback === "barcode" && (
-        <div className="scanner-inline-panel">
+        <div className="scanner-fallback-panel">
+          <div className="fallback-panel-copy">
+            <strong>Enter the barcode</strong>
+            <span>Type the UPC or EAN printed below the bars.</span>
+          </div>
           <form className="inline-form" onSubmit={handleBarcodeSubmit}>
             <input
               id={`barcode-input-${title.replace(/\W+/g, "-").toLowerCase()}`}
@@ -2941,24 +3347,56 @@ function ScannerFallbackSheet({
       )}
 
       {activeFallback === "paste" && (
-        <ManualIngredientPanel
-          manualText={manualText}
-          setManualText={setManualText}
-          manualCategory={manualCategory}
-          setManualCategory={setManualCategory}
-          analyzeManual={analyzeManual}
-        />
-      )}
-
-      {activeFallback === "label" && ocrReview && (
-        <OcrReviewPanel review={ocrReview} setReview={setOcrReview} applyOcrReview={applyOcrReview} />
-      )}
-
-      {activeFallback === "photo" && capturedPhoto && (
-        <div className="scanner-inline-panel">
-          <img className="scanner-photo-preview" src={capturedPhoto} alt="User-selected product" />
+        <div className="scanner-fallback-panel">
+          <ManualIngredientPanel
+            manualText={manualText}
+            setManualText={setManualText}
+            manualCategory={manualCategory}
+            setManualCategory={setManualCategory}
+            analyzeManual={analyzeManual}
+          />
         </div>
       )}
+
+      {activeFallback === "label" && (
+        <div className="scanner-fallback-panel">
+          <div className="fallback-panel-copy">
+            <strong>Review the product label</strong>
+            <span>Add a label photo, then confirm the extracted or entered fields.</span>
+          </div>
+          <button className="secondary-button compact-action" onClick={() => document.getElementById("label-photo")?.click()}>
+            <Camera size={17} />
+            Add label photo
+          </button>
+          {labelPhoto && <img className="scanner-photo-preview" src={labelPhoto} alt="Label selected for review" />}
+          {ocrReview && <OcrReviewPanel review={ocrReview} setReview={setOcrReview} applyOcrReview={applyOcrReview} />}
+        </div>
+      )}
+
+      {activeFallback === "photo" && (
+        <div className="scanner-fallback-panel">
+          <div className="fallback-panel-copy">
+            <strong>Add a product photo</strong>
+            <span>Use the front of the package for this report only.</span>
+          </div>
+          <button className="secondary-button compact-action" onClick={() => document.getElementById("product-photo")?.click()}>
+            <Camera size={17} />
+            Choose product photo
+          </button>
+          {capturedPhoto && <img className="scanner-photo-preview" src={capturedPhoto} alt="User-selected product" />}
+          {capturedPhoto && finishProductPhoto && hasMatchedProduct && (
+            <button className="primary-button full" onClick={finishProductPhoto}>
+              <Check size={17} />
+              Use this photo
+            </button>
+          )}
+          {capturedPhoto && !hasMatchedProduct && (
+            <span className="photo-ready-note">Photo ready. Add label details or ingredients to build the report.</span>
+          )}
+        </div>
+      )}
+
+      <button className="fallback-sample-link" onClick={useSampleProduct}>Try a demo product</button>
     </div>
   );
 }
@@ -2971,13 +3409,10 @@ function ManualIngredientPanel({
   analyzeManual
 }) {
   return (
-    <section className="card manual-card">
-      <div className="section-heading">
-        <div>
-          <span className="eyebrow">Fallback mode</span>
-          <h2>Paste ingredients</h2>
-        </div>
-        <Clipboard size={22} />
+    <div className="manual-inline-panel">
+      <div className="fallback-panel-copy">
+        <strong>Paste the label text</strong>
+        <span>Choose the product type, then add the ingredient or material list.</span>
       </div>
       <textarea
         id="ingredient-paste"
@@ -3003,11 +3438,11 @@ function ManualIngredientPanel({
           </button>
         ))}
       </div>
-      <button className="primary-button full" onClick={analyzeManual}>
+      <button className="primary-button full" onClick={analyzeManual} disabled={!manualText.trim()}>
         <Sparkles size={18} />
         Analyze
       </button>
-    </section>
+    </div>
   );
 }
 
@@ -3032,12 +3467,12 @@ function OcrReviewPanel({ review, setReview, applyOcrReview }) {
     <section id="ocr-review" className="card ocr-review-card">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">Demo OCR review</span>
+          <span className="eyebrow">Label review</span>
           <h2>Confirm label text</h2>
         </div>
         <ConfidenceBadge status="Manual Review" />
       </div>
-      <p className="review-note">Demo OCR text is prefilled for this MVP. Edit anything that does not match the label before analyzing.</p>
+      <p className="review-note">Enter or confirm what the label shows. Your report stays in manual review until the details are checked.</p>
       <div className="review-grid">
         <label>
           <span>Product name</span>
@@ -3054,12 +3489,20 @@ function OcrReviewPanel({ review, setReview, applyOcrReview }) {
           ["beauty", "Beauty"],
           ["household", "Household"],
           ["medicine", "Medicine"],
-          ["textile", "Fabric"]
+          ["textile", "Fabric"],
+          ["unknown", "Not Sure"]
         ].map(([value, label]) => (
           <button
             key={value}
             className={review.category === value ? "selected" : ""}
-            onClick={() => setReview((current) => ({ ...createOcrDraft(value, current.mode), productName: current.productName, brand: current.brand }))}
+            onClick={() =>
+              setReview((current) =>
+                createBlankLabelDraft(value, current.mode, {
+                  name: current.productName,
+                  brand: current.brand
+                })
+              )
+            }
           >
             {label}
           </button>
@@ -3129,10 +3572,14 @@ function OcrReviewPanel({ review, setReview, applyOcrReview }) {
         </label>
       )}
       <details className="raw-ocr-details">
-        <summary>Raw demo text</summary>
+        <summary>Full label text</summary>
         <textarea value={review.text || ""} onChange={(event) => updateField("text", event.target.value)} />
       </details>
-      <button className="primary-button full" onClick={applyOcrReview}>
+      <button
+        className="primary-button full"
+        onClick={applyOcrReview}
+        disabled={!primaryLabelText.trim() && !review.activeIngredient?.trim()}
+      >
         <Check size={18} />
         Confirm and Analyze
       </button>
@@ -3281,6 +3728,78 @@ function SampleDisclosure({ title, children }) {
   );
 }
 
+function getMissingProductFields(product) {
+  const missing = [];
+  const fieldMissing = (field) => product.fieldConfidence?.[field] === "Missing";
+  const add = (label) => {
+    if (!missing.includes(label)) missing.push(label);
+  };
+
+  if (!product.image && !product.userPhoto) add("Product photo");
+
+  if (product.category === "unknown") {
+    add("Product type");
+    add("Product label");
+  } else if (product.category === "food") {
+    if (!product.ingredients?.length || fieldMissing("ingredients")) add("Ingredients");
+    if (!hasCoreFoodNutrition(product.nutrition) || fieldMissing("nutrition")) add("Nutrition facts");
+    if (fieldMissing("additives")) add("Additives");
+    if (fieldMissing("allergens")) add("Allergens");
+  } else if (product.category === "medicine") {
+    if (!product.activeIngredient || /scan label|review active/i.test(product.activeIngredient)) add("Active ingredient");
+    if (!product.warnings?.length || fieldMissing("warnings")) add("Warnings");
+    if (!product.inactiveIngredients?.length || fieldMissing("inactiveIngredients")) add("Inactive ingredients");
+  } else if (product.category === "textile") {
+    if (!(product.materials?.length || product.ingredients?.length) || fieldMissing("materials")) add("Materials");
+    if (!product.treatmentNotes || /scan or paste|not found/i.test(product.treatmentNotes) || fieldMissing("care")) add("Care or treatment notes");
+  } else {
+    if (!product.ingredients?.length || fieldMissing("ingredients")) add("Ingredients");
+    if (product.category === "household" && (product.analysisPending || fieldMissing("cautions"))) add("Warning label");
+  }
+
+  return missing;
+}
+
+function LabelCompletionPanel({ product, onCompleteLabel }) {
+  const missingFields = getMissingProductFields(product);
+  if (!missingFields.length) return null;
+  const imageMissing = missingFields.includes("Product photo");
+
+  return (
+    <section className="label-completion-card">
+      <div className="label-completion-heading">
+        <span className="label-completion-icon"><Camera size={18} /></span>
+        <div>
+          <span className="eyebrow">Needs label</span>
+          <h2>Complete this report</h2>
+          <p>Add only the missing details. Existing product data will stay in place.</p>
+        </div>
+      </div>
+      <div className="missing-field-chips" aria-label="Missing product details">
+        {missingFields.map((field) => <span key={field}>{field}</span>)}
+      </div>
+      {onCompleteLabel && (
+        <div className="label-completion-actions">
+          <button className="primary-button" onClick={() => onCompleteLabel("label")}>
+            <Camera size={17} />
+            Add label details
+          </button>
+          <button className="quiet-action" onClick={() => onCompleteLabel("paste")}>
+            <Clipboard size={16} />
+            Paste label text
+          </button>
+          {imageMissing && (
+            <button className="quiet-action" onClick={() => onCompleteLabel("photo")}>
+              <Plus size={16} />
+              Add product photo
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ReportScreen({
   product,
   productIndex,
@@ -3298,7 +3817,8 @@ function ReportScreen({
   messageTone,
   setMessageTone,
   copied,
-  setCopied
+  setCopied,
+  onCompleteLabel
 }) {
   const meta = categoryMeta[product.category];
   const Icon = meta.icon;
@@ -3344,6 +3864,7 @@ function ReportScreen({
       {isMedicine ? (
         <>
           <MedicineSummary product={product} />
+          <LabelCompletionPanel product={product} onCompleteLabel={onCompleteLabel} />
           <section className="note-card">
             This is a label summary, not medical advice. Follow the product label and ask a doctor or pharmacist if unsure.
           </section>
@@ -3353,12 +3874,7 @@ function ReportScreen({
           {isTextile ? <TextileSummary product={product} /> : null}
 
           <ReportAtAGlance product={product} />
-
-          {product.analysisPending && (
-            <section className="note-card">
-              Scan or paste the label to complete analysis.
-            </section>
-          )}
+          <LabelCompletionPanel product={product} onCompleteLabel={onCompleteLabel} />
 
           {!isTextile && !product.analysisPending && product.breakdown?.length > 0 && (
             <ExpandableSection
