@@ -993,6 +993,17 @@ function normalizeBarcode(value) {
   return String(value || "").replace(/[^\dA-Za-z]/g, "");
 }
 
+const ZXING_ENHANCED_VARIANTS = Object.freeze([
+  "enlarged",
+  "grayscale-contrast",
+  "light-threshold",
+  "taller",
+  "shorter-center"
+]);
+const RECENT_BARCODE_TTL_MS = 6500;
+const ENHANCED_VARIANT_INTERVAL = 4;
+const CAMERA_SETTLE_MS = 900;
+
 const OPEN_FOOD_FACTS_PRODUCT_FIELDS = [
   "code",
   "status",
@@ -2551,12 +2562,22 @@ function ScanScreen({
   const html5ScannerRef = useRef(null);
   const zxingReaderRef = useRef(null);
   const zxingCanvasRef = useRef(null);
+  const zxingContextRef = useRef(null);
+  const zxingVariantCanvasesRef = useRef(new Map());
+  const zxingFrameIndexRef = useRef(0);
   const zxingTimerRef = useRef(null);
   const zxingFallbackTimerRef = useRef(null);
   const cameraTimerRef = useRef(null);
   const cameraRequestRef = useRef(0);
-  const scanResolvedRef = useRef(false);
-  const lastDecodedRef = useRef({ value: "", at: 0 });
+  const cameraReadyAtRef = useRef(0);
+  const recentBarcodesRef = useRef(new Map());
+  const activeBarcodeRef = useRef("");
+  const lookupInFlightRef = useRef(false);
+  const currentLookupBarcodeRef = useRef("");
+  const queuedBarcodeRef = useRef(null);
+  const pendingLookupResultRef = useRef(null);
+  const sheetStateRef = useRef("peek");
+  const sheetModeRef = useRef(null);
   const lastDiagnosticRenderRef = useRef(0);
   const lastDecoderCropSignatureRef = useRef("");
   const mountedRef = useRef(true);
@@ -2573,6 +2594,15 @@ function ScanScreen({
     cameraStreamStatus: "idle",
     video: { readyState: 0, width: 0, height: 0, paused: true },
     trackSettings: null,
+    cameraCapabilities: {
+      focusModes: [],
+      exposureModes: [],
+      whiteBalanceModes: [],
+      zoom: null,
+      torch: false
+    },
+    optionalConstraintResults: {},
+    cameraConstraintAttempts: [],
     barcodeDetector: "BarcodeDetector" in window,
     barcodeDetectorFormats: [],
     html5QrcodeLoaded: false,
@@ -2580,6 +2610,13 @@ function ScanScreen({
     activeDecoder: "none",
     decodedFrameCount: 0,
     frames: { html5Qrcode: 0, zxing: 0 },
+    decoderAttempts: { html5Qrcode: 0, zxingOriginal: 0, zxingEnhanced: 0 },
+    enhancedDecoderAttempts: 0,
+    successfulDecoder: "",
+    successfulImageVariant: "",
+    cameraReadyAt: null,
+    timeToSuccessfulDecodeMs: null,
+    queuedBarcode: "",
     visibleScanFrame: null,
     decoderCrop: null,
     decoderCrops: { html5Qrcode: null, zxing: null },
@@ -2610,10 +2647,21 @@ function ScanScreen({
     }
   }
 
-  function recordDecoderFrame(engine) {
-    const frames = diagnosticsRef.current.frames;
-    frames[engine] = (frames[engine] || 0) + 1;
-    diagnosticsRef.current.decodedFrameCount += 1;
+  function recordDecoderFrame(engine, { enhanced = false, variant = "original" } = {}) {
+    const frames = diagnosticsRef.current.frames || (diagnosticsRef.current.frames = { html5Qrcode: 0, zxing: 0 });
+    const decoderAttempts = diagnosticsRef.current.decoderAttempts || (diagnosticsRef.current.decoderAttempts = {
+      html5Qrcode: 0,
+      zxingOriginal: 0,
+      zxingEnhanced: 0
+    });
+    if (!enhanced) {
+      frames[engine] = (frames[engine] || 0) + 1;
+      diagnosticsRef.current.decodedFrameCount += 1;
+    }
+    const attemptKey = engine === "html5Qrcode" ? "html5Qrcode" : enhanced ? "zxingEnhanced" : "zxingOriginal";
+    decoderAttempts[attemptKey] = (decoderAttempts[attemptKey] || 0) + 1;
+    if (enhanced) diagnosticsRef.current.enhancedDecoderAttempts = (diagnosticsRef.current.enhancedDecoderAttempts || 0) + 1;
+    diagnosticsRef.current.lastAttempt = { engine, variant, enhanced };
     diagnosticsRef.current.visibleScanFrame = getVisibleScanFrameRect();
     window.__ZIYA_SCANNER_DIAGNOSTICS__ = diagnosticsRef.current;
     if (debugEnabled && mountedRef.current && Date.now() - lastDiagnosticRenderRef.current > 1000) {
@@ -2634,6 +2682,56 @@ function ScanScreen({
       facingMode: settings.facingMode || null,
       resizeMode: settings.resizeMode || null
     };
+  }
+
+  function getTrackCapabilitiesSummary(track) {
+    const capabilities = track?.getCapabilities?.() || {};
+    const range = (value) => value && typeof value === "object"
+      ? { min: value.min ?? null, max: value.max ?? null, step: value.step ?? null }
+      : null;
+    return {
+      focusModes: capabilities.focusMode ? Array.from(capabilities.focusMode) : [],
+      exposureModes: capabilities.exposureMode ? Array.from(capabilities.exposureMode) : [],
+      whiteBalanceModes: capabilities.whiteBalanceMode ? Array.from(capabilities.whiteBalanceMode) : [],
+      zoom: range(capabilities.zoom),
+      torch: Boolean(capabilities.torch)
+    };
+  }
+
+  async function applyOptionalCameraEnhancements(track) {
+    if (!track?.applyConstraints) return;
+    const capabilities = track.getCapabilities?.() || {};
+    const summary = getTrackCapabilitiesSummary(track);
+    updateDiagnostics({ cameraCapabilities: summary });
+    await new Promise((resolve) => window.setTimeout(resolve, 280));
+    if (track.readyState !== "live") return;
+
+    const optionalConstraints = [];
+    if (summary.focusModes.includes("continuous")) optionalConstraints.push(["continuousFocus", { focusMode: "continuous" }]);
+    if (summary.exposureModes.includes("continuous")) optionalConstraints.push(["continuousExposure", { exposureMode: "continuous" }]);
+    if (summary.whiteBalanceModes.includes("continuous")) optionalConstraints.push(["continuousWhiteBalance", { whiteBalanceMode: "continuous" }]);
+    if (summary.zoom) {
+      const currentZoom = track.getSettings?.().zoom ?? summary.zoom.min ?? 1;
+      const conservativeZoom = Math.min(summary.zoom.max ?? currentZoom, Math.max(summary.zoom.min ?? 1, 1.1));
+      if (Number.isFinite(conservativeZoom) && conservativeZoom > currentZoom + 0.01) {
+        optionalConstraints.push(["conservativeZoom", { zoom: conservativeZoom }]);
+      }
+    }
+
+    const results = {};
+    for (const [name, constraint] of optionalConstraints) {
+      try {
+        await track.applyConstraints({ advanced: [constraint] });
+        results[name] = "applied";
+      } catch (error) {
+        results[name] = `rejected: ${error?.name || "constraint error"}`;
+      }
+    }
+    updateDiagnostics({
+      optionalConstraintResults: results,
+      trackSettings: getTrackSettings(track),
+      cameraCapabilities: getTrackCapabilitiesSummary(track)
+    }, "optional camera tuning complete");
   }
 
   function roundRect(rect) {
@@ -2689,6 +2787,7 @@ function ScanScreen({
     if (!video) return;
     const track = video.srcObject?.getVideoTracks?.()[0] || streamRef.current?.getVideoTracks?.()[0];
     const streamStarted = Boolean(track && track.readyState === "live");
+    if (streamStarted && !cameraReadyAtRef.current) cameraReadyAtRef.current = Date.now();
     updateDiagnostics({
       streamStarted,
       cameraStreamStatus: streamStarted ? "live" : track?.readyState || "no live track",
@@ -2699,9 +2798,11 @@ function ScanScreen({
         paused: video.paused
       },
       trackSettings: getTrackSettings(track),
+      cameraCapabilities: getTrackCapabilitiesSummary(track),
       visibleScanFrame: getVisibleScanFrameRect(),
       visibleSourceCrop: getVisibleVideoSourceCrop(video),
       activeDecoder: engine,
+      cameraReadyAt: cameraReadyAtRef.current ? new Date(cameraReadyAtRef.current).toISOString() : null,
       lastError: ""
     }, `${engine} camera ready`);
   }
@@ -2730,6 +2831,9 @@ function ScanScreen({
     }
     zxingReaderRef.current = null;
     zxingCanvasRef.current = null;
+    zxingContextRef.current = null;
+    zxingVariantCanvasesRef.current.clear();
+    zxingFrameIndexRef.current = 0;
   }
 
   function getHtml5DecoderName(scanner = html5ScannerRef.current) {
@@ -2737,6 +2841,13 @@ function ScanScreen({
     return decoderName === "BarcodeDetector"
       ? "native BarcodeDetector via html5-qrcode"
       : `html5-qrcode ${decoderName}`;
+  }
+
+  function getHtml5SuccessfulDecoderName(scanner = html5ScannerRef.current) {
+    if (scanner?.qrcode?.secondaryDecoder && scanner.qrcode.wasPrimaryDecoderUsedInLastDecode === false) {
+      return "html5-qrcode zxing-js fallback";
+    }
+    return getHtml5DecoderName(scanner);
   }
 
   function createHtml5Qrbox(viewWidth, viewHeight) {
@@ -2810,7 +2921,12 @@ function ScanScreen({
     void stopHtml5Detection();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
-    scanResolvedRef.current = false;
+    lookupInFlightRef.current = false;
+    currentLookupBarcodeRef.current = "";
+    queuedBarcodeRef.current = null;
+    pendingLookupResultRef.current = null;
+    activeBarcodeRef.current = "";
+    recentBarcodesRef.current.clear();
     if (videoRef.current) videoRef.current.srcObject = null;
     updateDiagnostics({
       streamStarted: false,
@@ -2845,18 +2961,41 @@ function ScanScreen({
     setManualProduct(updatedProduct);
   }, [activeFallback, capturedPhoto, sheetProduct]);
 
-  function handleDecodedBarcode(rawValue) {
+  function isPlausibleScannerBarcode(value) {
+    return value.length >= 4 && value.length <= 64 && /^[\dA-Za-z]+$/.test(value);
+  }
+
+  function handleDecodedBarcode(rawValue, { decoder = "scanner", variant = "original" } = {}) {
     const decodedValue = normalizeBarcode(rawValue);
     const now = Date.now();
-    const duplicate = lastDecodedRef.current.value === decodedValue && now - lastDecodedRef.current.at < 3000;
-    if (!decodedValue || scanResolvedRef.current || duplicate) return;
+    if (!isPlausibleScannerBarcode(decodedValue)) return;
+    const elapsedToDecode = cameraReadyAtRef.current ? now - cameraReadyAtRef.current : null;
+    updateDiagnostics({
+      lastDecodedValue: decodedValue,
+      successfulDecoder: decoder,
+      successfulImageVariant: variant,
+      timeToSuccessfulDecodeMs: diagnosticsRef.current.timeToSuccessfulDecodeMs ?? elapsedToDecode,
+      lastError: ""
+    }, "barcode decoded");
 
-    scanResolvedRef.current = true;
-    lastDecodedRef.current = { value: decodedValue, at: now };
-    updateDiagnostics({ lastDecodedValue: decodedValue, lastError: "" }, "barcode decoded");
+    for (const [value, detectedAt] of recentBarcodesRef.current) {
+      if (now - detectedAt > RECENT_BARCODE_TTL_MS) recentBarcodesRef.current.delete(value);
+    }
+    const duplicate =
+      activeBarcodeRef.current === decodedValue
+      || currentLookupBarcodeRef.current === decodedValue
+      || now - (recentBarcodesRef.current.get(decodedValue) || 0) < RECENT_BARCODE_TTL_MS;
+    if (duplicate) return;
+
+    recentBarcodesRef.current.set(decodedValue, now);
     setBarcode(decodedValue);
-    pauseDetection();
-    void runBarcodeLookup(decodedValue);
+    const candidate = { barcode: decodedValue, decoder, variant, detectedAt: now, source: "scanner" };
+    if (lookupInFlightRef.current || sheetStateRef.current === "full") {
+      queuedBarcodeRef.current = candidate;
+      updateDiagnostics({ queuedBarcode: decodedValue }, "barcode queued");
+      return;
+    }
+    void runBarcodeLookup(decodedValue, candidate);
   }
 
   function getProductBarcodeFormats(module) {
@@ -2864,10 +3003,32 @@ function ScanScreen({
     return [formats.EAN_13, formats.EAN_8, formats.UPC_A, formats.UPC_E, formats.CODE_128];
   }
 
-  async function startHtml5Attempt(requestId, useIdealConstraints) {
+  function getCameraConstraintProfiles() {
+    return [
+      {
+        name: "rear 1920x1080 preferred",
+        videoConstraints: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      },
+      {
+        name: "rear 1280x720 preferred",
+        videoConstraints: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      },
+      { name: "rear browser default", videoConstraints: null }
+    ];
+  }
+
+  async function startHtml5Attempt(requestId, profile) {
     const module = await import("html5-qrcode");
     updateDiagnostics({ html5QrcodeLoaded: true }, "html5-qrcode loaded");
-    if (cameraRequestRef.current !== requestId || scanResolvedRef.current) return false;
+    if (cameraRequestRef.current !== requestId) return false;
 
     const scanner = new module.Html5Qrcode("ziya-html5-reader", {
       formatsToSupport: getProductBarcodeFormats(module),
@@ -2875,25 +3036,20 @@ function ScanScreen({
       verbose: false
     });
     html5ScannerRef.current = scanner;
-    const videoConstraints = {
-      facingMode: { ideal: "environment" },
-      width: { ideal: 1280 },
-      height: { ideal: 720 }
-    };
     await scanner.start(
-      { facingMode: useIdealConstraints ? { ideal: "environment" } : "environment" },
+      { facingMode: { ideal: "environment" } },
       {
         fps: 6,
         qrbox: createHtml5Qrbox,
         aspectRatio: 16 / 9,
         disableFlip: true,
-        ...(useIdealConstraints ? { videoConstraints } : {})
+        ...(profile.videoConstraints ? { videoConstraints: profile.videoConstraints } : {})
       },
       (decodedText) => {
-        recordDecoderFrame("html5Qrcode");
-        handleDecodedBarcode(decodedText);
+        recordDecoderFrame("html5Qrcode", { variant: "original" });
+        handleDecodedBarcode(decodedText, { decoder: getHtml5SuccessfulDecoderName(scanner), variant: "original" });
       },
-      () => recordDecoderFrame("html5Qrcode")
+      () => recordDecoderFrame("html5Qrcode", { variant: "original" })
     );
 
     if (cameraRequestRef.current !== requestId) {
@@ -2923,27 +3079,132 @@ function ScanScreen({
     setCameraStatus("active");
     setCameraMessage("Camera active - scan barcode or enter it manually.");
     const decoderName = getHtml5DecoderName(scanner);
-    updateDiagnostics({ html5PrimaryDecoder: decoderName, activeDecoder: decoderName });
+    updateDiagnostics({
+      html5PrimaryDecoder: decoderName,
+      activeDecoder: decoderName,
+      activeCameraProfile: profile.name
+    });
     syncVideoDiagnostics(videoRef.current || video, decoderName);
+    const track = streamRef.current?.getVideoTracks?.()[0];
+    if (track) void applyOptionalCameraEnhancements(track);
     scheduleZxingFallback();
     return true;
   }
 
   async function startHtml5Detection(requestId) {
-    try {
-      return await startHtml5Attempt(requestId, true);
-    } catch (error) {
-      updateDiagnostics({ lastError: `High-resolution camera: ${String(error?.message || error)}` });
-      await stopHtml5Detection();
-      if (html5ContainerRef.current) html5ContainerRef.current.innerHTML = "";
+    const attempts = [];
+    let lastError = null;
+    for (const profile of getCameraConstraintProfiles()) {
+      try {
+        const started = await startHtml5Attempt(requestId, profile);
+        attempts.push({ profile: profile.name, status: started ? "started" : "cancelled" });
+        updateDiagnostics({ cameraConstraintAttempts: attempts });
+        return started;
+      } catch (error) {
+        lastError = error;
+        attempts.push({
+          profile: profile.name,
+          status: "failed",
+          error: `${error?.name || "CameraError"}: ${String(error?.message || error)}`
+        });
+        updateDiagnostics({ cameraConstraintAttempts: attempts });
+        await stopHtml5Detection();
+        if (html5ContainerRef.current) html5ContainerRef.current.innerHTML = "";
+        if (["NotAllowedError", "PermissionDeniedError", "NotReadableError"].includes(error?.name)) throw error;
+      }
     }
+    updateDiagnostics({ lastError: `html5-qrcode start: ${String(lastError?.message || lastError)}` }, "html5-qrcode failed");
+    return false;
+  }
+
+  function getReusableVariantCanvas(name, width, height) {
+    let entry = zxingVariantCanvasesRef.current.get(name);
+    if (!entry) {
+      const canvas = document.createElement("canvas");
+      entry = { canvas, context: canvas.getContext("2d", { willReadFrequently: true }) };
+      zxingVariantCanvasesRef.current.set(name, entry);
+    }
+    if (entry.canvas.width !== width) entry.canvas.width = width;
+    if (entry.canvas.height !== height) entry.canvas.height = height;
+    return entry;
+  }
+
+  function prepareZxingVariant(name, { video, baseCanvas, sourceX, sourceY, cropWidth, cropHeight }) {
+    let width = cropWidth;
+    let height = cropHeight;
+    let drawSource = baseCanvas;
+    let sourceRect = null;
+    let filter = "none";
+    let pixelTransform = null;
+
+    if (name === "enlarged") {
+      width = Math.round(cropWidth * 1.35);
+      height = Math.round(cropHeight * 1.35);
+    } else if (name === "grayscale-contrast") {
+      filter = "grayscale(1) contrast(1.28)";
+      pixelTransform = "grayscale-contrast";
+    } else if (name === "light-threshold") {
+      pixelTransform = "light-threshold";
+    } else if (name === "taller") {
+      height = Math.min(video.videoHeight, Math.round(cropHeight * 1.18));
+      const y = Math.max(0, Math.min(video.videoHeight - height, Math.round(sourceY + (cropHeight - height) / 2)));
+      drawSource = video;
+      sourceRect = { x: sourceX, y, width: cropWidth, height };
+    } else if (name === "shorter-center") {
+      height = Math.max(50, Math.round(cropHeight * 0.82));
+      const y = Math.max(0, Math.min(video.videoHeight - height, Math.round(sourceY + (cropHeight - height) / 2)));
+      drawSource = video;
+      sourceRect = { x: sourceX, y, width: cropWidth, height };
+    }
+
+    const { canvas, context } = getReusableVariantCanvas(name, width, height);
+    context.save();
+    context.clearRect(0, 0, width, height);
+    context.imageSmoothingEnabled = false;
+    const supportsCanvasFilter = "filter" in context;
+    if (supportsCanvasFilter) context.filter = filter;
+    if (sourceRect) {
+      context.drawImage(
+        drawSource,
+        sourceRect.x,
+        sourceRect.y,
+        sourceRect.width,
+        sourceRect.height,
+        0,
+        0,
+        width,
+        height
+      );
+    } else {
+      context.drawImage(drawSource, 0, 0, baseCanvas.width, baseCanvas.height, 0, 0, width, height);
+    }
+    if (pixelTransform === "light-threshold" || (pixelTransform === "grayscale-contrast" && !supportsCanvasFilter)) {
+      const imageData = context.getImageData(0, 0, width, height);
+      const pixels = imageData.data;
+      for (let index = 0; index < pixels.length; index += 4) {
+        const luminance = 0.299 * pixels[index] + 0.587 * pixels[index + 1] + 0.114 * pixels[index + 2];
+        const value = pixelTransform === "light-threshold"
+          ? luminance >= 136 ? 255 : 0
+          : Math.max(0, Math.min(255, 128 + (luminance - 128) * 1.28));
+        pixels[index] = value;
+        pixels[index + 1] = value;
+        pixels[index + 2] = value;
+      }
+      context.putImageData(imageData, 0, 0);
+    }
+    context.restore();
+    return canvas;
+  }
+
+  function tryZxingDecode(reader, canvas, variant, enhanced) {
+    recordDecoderFrame("zxing", { variant, enhanced });
     try {
-      return await startHtml5Attempt(requestId, false);
+      return reader.decodeFromCanvas(canvas) || null;
     } catch (error) {
-      updateDiagnostics({ lastError: `html5-qrcode start: ${String(error?.message || error)}` }, "html5-qrcode failed");
-      await stopHtml5Detection();
-      if (html5ContainerRef.current) html5ContainerRef.current.innerHTML = "";
-      return false;
+      if (!["NotFoundException", "ChecksumException", "FormatException"].includes(error?.name)) {
+        updateDiagnostics({ lastError: `ZXing ${variant}: ${String(error?.message || error)}` });
+      }
+      return null;
     }
   }
 
@@ -2951,21 +3212,22 @@ function ScanScreen({
     if (zxingFallbackTimerRef.current) window.clearTimeout(zxingFallbackTimerRef.current);
     zxingFallbackTimerRef.current = window.setTimeout(() => {
       zxingFallbackTimerRef.current = null;
-      if (!scanResolvedRef.current && streamRef.current) void startZxingDetection();
+      if (streamRef.current) void startZxingDetection();
     }, delay);
   }
 
   async function startZxingDetection() {
-    if (!videoRef.current || !streamRef.current || scanResolvedRef.current || zxingReaderRef.current) return false;
+    if (!videoRef.current || !streamRef.current || zxingReaderRef.current) return false;
     try {
       const { BrowserMultiFormatOneDReader } = await import("@zxing/browser");
-      if (!videoRef.current || !streamRef.current || scanResolvedRef.current) return false;
+      if (!videoRef.current || !streamRef.current) return false;
       const reader = new BrowserMultiFormatOneDReader(undefined, {
         delayBetweenScanAttempts: 160,
         delayBetweenScanSuccess: 1200
       });
       zxingReaderRef.current = reader;
       zxingCanvasRef.current = document.createElement("canvas");
+      zxingContextRef.current = zxingCanvasRef.current.getContext("2d", { willReadFrequently: true });
       const alongsideHtml5 = Boolean(html5ScannerRef.current?.isScanning);
       const activeDecoder = alongsideHtml5
         ? `${getHtml5DecoderName()} + cropped ZXing`
@@ -2975,7 +3237,7 @@ function ScanScreen({
       const scanFrame = () => {
         const video = videoRef.current;
         const canvas = zxingCanvasRef.current;
-        if (!video || !canvas || !zxingReaderRef.current || scanResolvedRef.current) return;
+        if (!video || !canvas || !zxingReaderRef.current) return;
         if (video.readyState >= 2 && video.videoWidth > 0) {
           const crop = getVisibleVideoSourceCrop(video);
           if (!crop) {
@@ -2986,9 +3248,13 @@ function ScanScreen({
           const sourceY = Math.max(0, Math.floor(crop.y));
           const cropWidth = Math.max(1, Math.min(video.videoWidth - sourceX, Math.round(crop.width)));
           const cropHeight = Math.max(1, Math.min(video.videoHeight - sourceY, Math.round(crop.height)));
-          canvas.width = cropWidth;
-          canvas.height = cropHeight;
-          const context = canvas.getContext("2d", { willReadFrequently: true });
+          if (canvas.width !== cropWidth) canvas.width = cropWidth;
+          if (canvas.height !== cropHeight) canvas.height = cropHeight;
+          const context = zxingContextRef.current;
+          if (!context) {
+            zxingTimerRef.current = window.setTimeout(scanFrame, 160);
+            return;
+          }
           context.drawImage(video, sourceX, sourceY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
           const decoderCrop = roundRect({
             engine: "cropped ZXing",
@@ -3012,16 +3278,27 @@ function ScanScreen({
               }
             }, "ZXing crop aligned");
           }
-          recordDecoderFrame("zxing");
-          try {
-            const result = zxingReaderRef.current.decodeFromCanvas(canvas);
-            if (result) {
-              handleDecodedBarcode(result.getText());
-              return;
-            }
-          } catch (error) {
-            if (!["NotFoundException", "ChecksumException", "FormatException"].includes(error?.name)) {
-              updateDiagnostics({ lastError: `ZXing frame: ${String(error?.message || error)}` });
+          zxingFrameIndexRef.current += 1;
+          const rawResult = tryZxingDecode(zxingReaderRef.current, canvas, "original", false);
+          if (rawResult) {
+            handleDecodedBarcode(rawResult.getText(), { decoder: "cropped ZXing", variant: "original" });
+          } else if (
+            zxingFrameIndexRef.current % ENHANCED_VARIANT_INTERVAL === 0
+            && Date.now() - cameraReadyAtRef.current >= CAMERA_SETTLE_MS
+          ) {
+            const variantIndex = (Math.floor(zxingFrameIndexRef.current / ENHANCED_VARIANT_INTERVAL) - 1) % ZXING_ENHANCED_VARIANTS.length;
+            const variant = ZXING_ENHANCED_VARIANTS[variantIndex];
+            const variantCanvas = prepareZxingVariant(variant, {
+              video,
+              baseCanvas: canvas,
+              sourceX,
+              sourceY,
+              cropWidth,
+              cropHeight
+            });
+            const enhancedResult = tryZxingDecode(zxingReaderRef.current, variantCanvas, variant, true);
+            if (enhancedResult) {
+              handleDecodedBarcode(enhancedResult.getText(), { decoder: "cropped ZXing", variant });
             }
           }
         }
@@ -3039,19 +3316,28 @@ function ScanScreen({
   }
 
   async function getCameraStream() {
-    try {
-      return await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
-      });
-    } catch (error) {
-      if (!["OverconstrainedError", "ConstraintNotSatisfiedError"].includes(error?.name)) throw error;
-      updateDiagnostics({ lastError: `Camera constraints: ${String(error?.message || error)}` });
-      return navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    const attempts = [...(diagnosticsRef.current.cameraConstraintAttempts || [])];
+    let lastError = null;
+    for (const profile of getCameraConstraintProfiles()) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: profile.videoConstraints || { facingMode: { ideal: "environment" } }
+        });
+        attempts.push({ profile: `fallback ${profile.name}`, status: "started" });
+        updateDiagnostics({ cameraConstraintAttempts: attempts });
+        return stream;
+      } catch (error) {
+        lastError = error;
+        attempts.push({
+          profile: `fallback ${profile.name}`,
+          status: "failed",
+          error: `${error?.name || "CameraError"}: ${String(error?.message || error)}`
+        });
+        updateDiagnostics({ cameraConstraintAttempts: attempts });
+        if (!["OverconstrainedError", "ConstraintNotSatisfiedError", "TypeError"].includes(error?.name)) throw error;
+      }
     }
+    throw lastError || new Error("No camera constraint profile could start.");
   }
 
   async function startFallbackCamera(requestId) {
@@ -3074,6 +3360,8 @@ function ScanScreen({
     setCameraStatus("active");
     setCameraMessage("Camera active - scan barcode or enter it manually.");
     syncVideoDiagnostics(video, "zxing-crop");
+    const track = stream.getVideoTracks?.()[0];
+    if (track) void applyOptionalCameraEnhancements(track);
     await startZxingDetection();
     return true;
   }
@@ -3088,6 +3376,7 @@ function ScanScreen({
     setCameraStatus("requesting");
     setCameraMessage("Requesting camera permission...");
     setDebugCropCaptures([]);
+    cameraReadyAtRef.current = 0;
     lastDecoderCropSignatureRef.current = "";
     updateDiagnostics({
       secureContext: window.isSecureContext,
@@ -3097,8 +3386,25 @@ function ScanScreen({
       html5QrcodeLoaded: false,
       zxingLoaded: false,
       activeDecoder: "none",
+      activeCameraProfile: "",
       decodedFrameCount: 0,
       frames: { html5Qrcode: 0, zxing: 0 },
+      decoderAttempts: { html5Qrcode: 0, zxingOriginal: 0, zxingEnhanced: 0 },
+      enhancedDecoderAttempts: 0,
+      successfulDecoder: "",
+      successfulImageVariant: "",
+      cameraReadyAt: null,
+      timeToSuccessfulDecodeMs: null,
+      queuedBarcode: "",
+      cameraCapabilities: {
+        focusModes: [],
+        exposureModes: [],
+        whiteBalanceModes: [],
+        zoom: null,
+        torch: false
+      },
+      optionalConstraintResults: {},
+      cameraConstraintAttempts: [],
       visibleScanFrame: getVisibleScanFrameRect(),
       decoderCrop: null,
       decoderCrops: { html5Qrcode: null, zxing: null },
@@ -3162,7 +3468,6 @@ function ScanScreen({
   async function decodeBarcodePhoto(file) {
     if (!file) return;
     setBarcodePhotoLoading(true);
-    scanResolvedRef.current = false;
     let fileScanner = null;
     try {
       const module = await import("html5-qrcode");
@@ -3174,7 +3479,7 @@ function ScanScreen({
       });
       const decodedValue = await fileScanner.scanFile(file, false);
       updateDiagnostics({ lastDecodedValue: decodedValue, lastError: "" }, "barcode decoded from photo");
-      handleDecodedBarcode(decodedValue);
+      handleDecodedBarcode(decodedValue, { decoder: "barcode photo", variant: "still image" });
     } catch (error) {
       updateDiagnostics({ lastError: `Barcode photo: ${String(error?.message || error)}` }, "barcode photo failed");
       setCameraMessage("Couldn't read that photo - enter the barcode manually.");
@@ -3290,58 +3595,112 @@ function ScanScreen({
     }
   }
 
-  async function runBarcodeLookup(nextBarcode) {
-    const lookupValue = normalizeBarcode(nextBarcode ?? barcode);
+  function updateSheetState(nextState) {
+    const resolved = typeof nextState === "function" ? nextState(sheetStateRef.current) : nextState;
+    sheetStateRef.current = resolved;
+    setSheetState(resolved);
+    if (resolved !== "full") window.setTimeout(flushPendingContinuousScan, 0);
+  }
+
+  function applyLookupResult(lookupValue, result) {
+    activeBarcodeRef.current = lookupValue;
     setBarcode(lookupValue);
-    scanResolvedRef.current = true;
-    pauseDetection();
+    setCameraMessage("");
+    setExpandedSection(null);
+    setActionOpen(false);
+    if (result.status === "found" && result.product) {
+      setManualProduct(result.product);
+      onRecordHistory(result.product);
+      setSheetProduct(result.product);
+      setManualCategory(result.product.category === "unknown" ? "not-sure" : result.product.category);
+      sheetModeRef.current = "product";
+      setSheetMode("product");
+      updateSheetState("peek");
+      setActiveFallback(null);
+      return;
+    }
+    setSheetProduct(null);
+    sheetModeRef.current = "not-found";
+    setSheetMode("not-found");
+    updateSheetState("mid");
+    setActiveFallback("barcode");
+  }
+
+  function flushPendingContinuousScan() {
+    if (lookupInFlightRef.current || sheetStateRef.current === "full") return;
+    const queued = queuedBarcodeRef.current;
+    if (queued) {
+      queuedBarcodeRef.current = null;
+      pendingLookupResultRef.current = null;
+      updateDiagnostics({ queuedBarcode: "" });
+      void runBarcodeLookup(queued.barcode, queued);
+      return;
+    }
+    const pending = pendingLookupResultRef.current;
+    if (pending) {
+      pendingLookupResultRef.current = null;
+      applyLookupResult(pending.barcode, pending.result);
+    }
+  }
+
+  async function runBarcodeLookup(nextBarcode, request = { source: "manual" }) {
+    const lookupValue = normalizeBarcode(nextBarcode ?? barcode);
+    const lookupRequest = {
+      source: request?.source || "manual",
+      decoder: request?.decoder || "manual barcode",
+      variant: request?.variant || "manual",
+      detectedAt: request?.detectedAt || Date.now(),
+      barcode: lookupValue
+    };
+    setBarcode(lookupValue);
     if (!lookupValue) {
       setLookupLoading(false);
-      setSheetProduct(null);
-      setSheetMode("not-found");
-      setSheetState("mid");
+      applyLookupResult("", { status: "not_found", product: null });
+      return;
+    }
+    if (lookupInFlightRef.current) {
+      if (currentLookupBarcodeRef.current !== lookupValue) {
+        queuedBarcodeRef.current = lookupRequest;
+        updateDiagnostics({ queuedBarcode: lookupValue }, "barcode queued during lookup");
+      }
       return;
     }
 
+    lookupInFlightRef.current = true;
+    currentLookupBarcodeRef.current = lookupValue;
     setLookupLoading(true);
     clearBarcodeMiss();
-    setSheetProduct(null);
-    if (sheetMode) {
-      setSheetMode("fallback");
-      setSheetState("mid");
-      setActiveFallback("barcode");
-    } else {
-      setCameraMessage("Looking up product...");
-    }
+    if (!sheetModeRef.current) setCameraMessage("Looking up product...");
+
     try {
-      const result = await lookupProductByBarcode(lookupValue);
-      setLookupLoading(false);
-      setCameraMessage("");
-      if (result.status === "found" && result.product) {
-        setManualProduct(result.product);
-        onRecordHistory(result.product);
-        setSheetProduct(result.product);
-        setManualCategory(result.product.category === "unknown" ? "not-sure" : result.product.category);
-        setSheetMode("product");
-        setSheetState("peek");
-        setActiveFallback(null);
+      let result;
+      try {
+        result = await lookupProductByBarcode(lookupValue);
+      } catch {
+        result = { status: "not_found", barcode: lookupValue, product: null };
+      }
+      if (!mountedRef.current) return;
+      const hasNewerQueuedBarcode = queuedBarcodeRef.current?.barcode && queuedBarcodeRef.current.barcode !== lookupValue;
+      if (lookupRequest.source === "scanner" && hasNewerQueuedBarcode) return;
+      if (lookupRequest.source === "scanner" && sheetStateRef.current === "full") {
+        pendingLookupResultRef.current = { barcode: lookupValue, result };
         return;
       }
-      setSheetProduct(null);
-      setSheetMode("not-found");
-      setSheetState("mid");
-    } catch {
-      setLookupLoading(false);
-      setCameraMessage("");
-      setSheetProduct(null);
-      setSheetMode("not-found");
-      setSheetState("mid");
+      applyLookupResult(lookupValue, result);
+    } finally {
+      lookupInFlightRef.current = false;
+      currentLookupBarcodeRef.current = "";
+      if (mountedRef.current) {
+        setLookupLoading(false);
+        if (sheetStateRef.current !== "full") window.setTimeout(flushPendingContinuousScan, 0);
+      }
     }
   }
 
   function openFallback(mode) {
+    sheetModeRef.current = "fallback";
     setSheetMode("fallback");
-    setSheetState(mode === "paste" || mode === "label" ? "full" : "mid");
+    updateSheetState(mode === "paste" || mode === "label" ? "full" : "mid");
     setActiveFallback(mode);
     if (mode === "photo") {
       window.setTimeout(() => document.getElementById("product-photo")?.click(), 20);
@@ -3359,8 +3718,9 @@ function ScanScreen({
   function useSampleProduct() {
     const sample = products.find((product) => product.id === "pop-secret") || products[0];
     setSheetProduct(sample);
+    sheetModeRef.current = "product";
     setSheetMode("product");
-    setSheetState("peek");
+    updateSheetState("peek");
     setActiveFallback(null);
   }
 
@@ -3378,8 +3738,9 @@ function ScanScreen({
     setManualProduct(report);
     onRecordHistory(report);
     setSheetProduct(report);
+    sheetModeRef.current = "product";
     setSheetMode("product");
-    setSheetState("full");
+    updateSheetState("full");
     setActiveFallback(null);
     setExpandedSection(null);
   }
@@ -3391,8 +3752,9 @@ function ScanScreen({
     setManualProduct(report);
     onRecordHistory(report);
     setSheetProduct(report);
+    sheetModeRef.current = "product";
     setSheetMode("product");
-    setSheetState("full");
+    updateSheetState("full");
     setActiveFallback(null);
     setOcrReview(null);
     setExpandedSection(null);
@@ -3413,23 +3775,24 @@ function ScanScreen({
       )
     );
     setActiveFallback("label");
+    sheetModeRef.current = "fallback";
     setSheetMode("fallback");
-    setSheetState("full");
+    updateSheetState("full");
   }
 
   function finishProductPhoto() {
     if (!sheetProduct || !capturedPhoto) return;
+    sheetModeRef.current = "product";
     setSheetMode("product");
-    setSheetState("full");
+    updateSheetState("full");
     setActiveFallback(null);
   }
 
   function expandSheet() {
-    setSheetState((current) => (current === "peek" ? "mid" : "full"));
+    updateSheetState((current) => (current === "peek" ? "mid" : "full"));
   }
 
   function resumeDetection() {
-    scanResolvedRef.current = false;
     if (cameraStatus !== "active") {
       setCameraMessage(
         cameraStatus === "denied"
@@ -3452,9 +3815,11 @@ function ScanScreen({
   }
 
   function dismissSheet() {
+    sheetModeRef.current = null;
+    activeBarcodeRef.current = "";
     setSheetMode(null);
     setSheetProduct(null);
-    setSheetState("peek");
+    updateSheetState("peek");
     setActiveFallback(null);
     setExpandedSection(null);
     resumeDetection();
@@ -3462,11 +3827,11 @@ function ScanScreen({
 
   function collapseSheet() {
     if (sheetState === "full") {
-      setSheetState(sheetMode === "product" ? "peek" : "mid");
+      updateSheetState(sheetMode === "product" ? "peek" : "mid");
       return;
     }
     if (sheetState === "mid" && sheetMode === "product") {
-      setSheetState("peek");
+      updateSheetState("peek");
       return;
     }
     dismissSheet();
@@ -3592,7 +3957,7 @@ function ScanScreen({
       <ScannerBottomSheet
         mode={sheetMode}
         sheetState={sheetState}
-        setSheetState={setSheetState}
+        setSheetState={updateSheetState}
         product={sheetProduct}
         productIndex={sheetProductIndex}
         expandedSection={expandedSection}
