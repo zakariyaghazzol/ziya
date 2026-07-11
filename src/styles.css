@@ -2739,6 +2739,9 @@ button {
 }
 
 .scanner-live {
+  --scan-frame-width: min(calc(100% - 48px), 340px);
+  --scan-frame-height: clamp(122px, 38vw, 148px);
+  --scan-frame-half-height: clamp(61px, 19vw, 74px);
   position: fixed;
   z-index: 900;
   top: 0;
@@ -2754,7 +2757,6 @@ button {
 }
 
 .scanner-video,
-.scanner-html5-reader,
 .scanner-fallback-bg,
 .scanner-shade {
   position: absolute;
@@ -2762,6 +2764,7 @@ button {
 }
 
 .scanner-video {
+  z-index: 1;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -2776,51 +2779,41 @@ button {
 }
 
 .scanner-html5-reader {
-  z-index: 1;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
+  position: absolute !important;
+  z-index: 0;
+  top: 0;
+  left: 0;
+  width: 1280px;
+  min-height: 720px;
+  overflow: visible;
   opacity: 0;
   pointer-events: none;
-  background: #101612;
-  transition: opacity 0.35s ease;
-}
-
-.scanner-html5-reader.is-active {
-  opacity: 1;
-}
-
-.scanner-html5-reader > div,
-.scanner-html5-reader video {
-  width: 100% !important;
-  height: 100% !important;
 }
 
 .scanner-html5-reader video {
-  object-fit: cover !important;
-  transform: scale(1.01);
+  display: block !important;
+  width: 1280px !important;
+  height: auto !important;
+  object-fit: contain !important;
+  transform: none !important;
 }
 
 .scanner-html5-reader canvas,
 .scanner-html5-reader #qr-shaded-region {
-  opacity: 0 !important;
   pointer-events: none !important;
 }
 
-.scanner-html5-reader > div:not([id]) {
-  display: none !important;
-}
-
 .scanner-fallback-bg {
+  z-index: 0;
   background: linear-gradient(155deg, #403827 0%, #1b221d 52%, #101612 100%);
 }
 
-.scanner-video.is-active ~ .scanner-fallback-bg,
-.scanner-html5-reader.is-active ~ .scanner-fallback-bg {
+.scanner-video.is-active ~ .scanner-fallback-bg {
   opacity: 0;
 }
 
 .scanner-shade {
+  z-index: 2;
   background:
     linear-gradient(180deg, rgba(0, 0, 0, 0.34), transparent 28%, transparent 54%, rgba(0, 0, 0, 0.46)),
     radial-gradient(circle at center, transparent 32%, rgba(0, 0, 0, 0.22) 100%);
@@ -2864,20 +2857,20 @@ button {
   position: absolute;
   z-index: 4;
   inset: 0;
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 14px;
-  padding-bottom: 78px;
   color: rgba(255, 255, 255, 0.92);
   pointer-events: none;
   text-align: center;
 }
 
 .scan-corners {
-  position: relative;
-  width: min(74vw, 318px);
-  height: 210px;
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  left: 50%;
+  width: var(--scan-frame-width);
+  height: var(--scan-frame-height);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
 .scan-corners span {
@@ -2942,12 +2935,16 @@ button {
 
 .scanner-center p,
 .scanner-center small {
+  position: absolute;
+  left: 50%;
   margin: 0;
   max-width: 310px;
+  transform: translateX(-50%);
   text-shadow: 0 2px 12px rgba(0, 0, 0, 0.38);
 }
 
 .scanner-center p {
+  top: calc(50% + var(--scan-frame-half-height) + 16px);
   min-height: 34px;
   display: inline-flex;
   align-items: center;
@@ -2962,6 +2959,8 @@ button {
 }
 
 .scanner-center small {
+  top: calc(50% + var(--scan-frame-half-height) + 60px);
+  width: min(calc(100% - 48px), 310px);
   color: rgba(255, 255, 255, 0.78);
   font-size: 0.74rem;
   line-height: 1.35;
@@ -3052,13 +3051,62 @@ button {
 
 .scanner-diagnostics-body button {
   min-height: 34px;
-  margin-top: 10px;
   border: 0;
   border-radius: 10px;
   padding: 0 10px;
   color: #123322;
   background: #dff7e8;
   font-weight: 900;
+}
+
+.scanner-diagnostics-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.scanner-debug-crop {
+  margin: 12px 0 0;
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.scanner-debug-crop figcaption {
+  margin-bottom: 7px;
+  color: rgba(238, 247, 241, 0.76);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.scanner-debug-crop img {
+  display: block;
+  width: 100%;
+  max-height: 150px;
+  border-radius: 8px;
+  object-fit: contain;
+  background: #050806;
+}
+
+.scanner-debug-crop a,
+.scanner-diagnostics-comparison a {
+  color: #aef0c9;
+  font-weight: 800;
+}
+
+.scanner-debug-crop a {
+  display: inline-flex;
+  margin-top: 7px;
+  font-size: 0.7rem;
+}
+
+.scanner-diagnostics-comparison {
+  margin: 12px 0 0;
+  color: rgba(238, 247, 241, 0.76);
+  font-size: 0.7rem;
+  line-height: 1.45;
 }
 
 .barcode-file-reader {

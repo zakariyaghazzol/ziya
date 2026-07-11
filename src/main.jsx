@@ -2542,6 +2542,9 @@ function ScanScreen({
   const [barcodePhotoLoading, setBarcodePhotoLoading] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [diagnosticsVersion, setDiagnosticsVersion] = useState(0);
+  const [debugCropCaptures, setDebugCropCaptures] = useState([]);
+  const scannerLiveRef = useRef(null);
+  const scanFrameRef = useRef(null);
   const videoRef = useRef(null);
   const html5ContainerRef = useRef(null);
   const streamRef = useRef(null);
@@ -2549,15 +2552,17 @@ function ScanScreen({
   const zxingReaderRef = useRef(null);
   const zxingCanvasRef = useRef(null);
   const zxingTimerRef = useRef(null);
+  const zxingFallbackTimerRef = useRef(null);
   const cameraTimerRef = useRef(null);
   const cameraRequestRef = useRef(0);
   const scanResolvedRef = useRef(false);
   const lastDecodedRef = useRef({ value: "", at: 0 });
   const lastDiagnosticRenderRef = useRef(0);
+  const lastDecoderCropSignatureRef = useRef("");
   const mountedRef = useRef(true);
   const dragStartY = useRef(null);
   const debugEnabled = useMemo(
-    () => import.meta.env.DEV || new URLSearchParams(window.location.search).get("scannerDebug") === "1",
+    () => new URLSearchParams(window.location.search).get("scannerDebug") === "1",
     []
   );
   const diagnosticsRef = useRef({
@@ -2565,6 +2570,7 @@ function ScanScreen({
     secureContext: window.isSecureContext,
     mediaDevices: Boolean(navigator.mediaDevices?.getUserMedia),
     streamStarted: false,
+    cameraStreamStatus: "idle",
     video: { readyState: 0, width: 0, height: 0, paused: true },
     trackSettings: null,
     barcodeDetector: "BarcodeDetector" in window,
@@ -2572,9 +2578,15 @@ function ScanScreen({
     html5QrcodeLoaded: false,
     zxingLoaded: false,
     activeDecoder: "none",
+    decodedFrameCount: 0,
     frames: { html5Qrcode: 0, zxing: 0 },
+    visibleScanFrame: null,
+    decoderCrop: null,
+    decoderCrops: { html5Qrcode: null, zxing: null },
+    capturedDecoderFrames: [],
     lastDecodedValue: "",
-    lastError: ""
+    lastError: "",
+    lastScannerError: ""
   });
 
   const sheetProductIndex = useMemo(() => {
@@ -2584,9 +2596,12 @@ function ScanScreen({
   }, [productIndex, sheetProduct]);
 
   function updateDiagnostics(patch, eventName) {
+    const normalizedPatch = patch.lastError === undefined
+      ? patch
+      : { ...patch, lastScannerError: patch.lastError };
     diagnosticsRef.current = {
       ...diagnosticsRef.current,
-      ...patch
+      ...normalizedPatch
     };
     window.__ZIYA_SCANNER_DIAGNOSTICS__ = diagnosticsRef.current;
     if (debugEnabled && mountedRef.current) {
@@ -2598,6 +2613,8 @@ function ScanScreen({
   function recordDecoderFrame(engine) {
     const frames = diagnosticsRef.current.frames;
     frames[engine] = (frames[engine] || 0) + 1;
+    diagnosticsRef.current.decodedFrameCount += 1;
+    diagnosticsRef.current.visibleScanFrame = getVisibleScanFrameRect();
     window.__ZIYA_SCANNER_DIAGNOSTICS__ = diagnosticsRef.current;
     if (debugEnabled && mountedRef.current && Date.now() - lastDiagnosticRenderRef.current > 1000) {
       lastDiagnosticRenderRef.current = Date.now();
@@ -2608,6 +2625,8 @@ function ScanScreen({
   function getTrackSettings(track) {
     const settings = track?.getSettings?.() || {};
     return {
+      deviceId: settings.deviceId || null,
+      groupId: settings.groupId || null,
       width: settings.width || null,
       height: settings.height || null,
       frameRate: settings.frameRate || null,
@@ -2617,11 +2636,62 @@ function ScanScreen({
     };
   }
 
+  function roundRect(rect) {
+    if (!rect) return null;
+    return Object.fromEntries(
+      Object.entries(rect).map(([key, value]) => [key, typeof value === "number" ? Math.round(value * 100) / 100 : value])
+    );
+  }
+
+  function getVisibleScanFrameRect() {
+    const scanner = scannerLiveRef.current;
+    const frame = scanFrameRef.current;
+    if (!scanner || !frame) return null;
+    const scannerRect = scanner.getBoundingClientRect();
+    const frameRect = frame.getBoundingClientRect();
+    return roundRect({
+      x: frameRect.left - scannerRect.left,
+      y: frameRect.top - scannerRect.top,
+      width: frameRect.width,
+      height: frameRect.height,
+      viewportWidth: scannerRect.width,
+      viewportHeight: scannerRect.height
+    });
+  }
+
+  function mapVisibleFrameToSurface(surfaceWidth, surfaceHeight) {
+    const frame = getVisibleScanFrameRect();
+    if (!frame || !surfaceWidth || !surfaceHeight) return null;
+    const scale = Math.max(frame.viewportWidth / surfaceWidth, frame.viewportHeight / surfaceHeight);
+    const renderedWidth = surfaceWidth * scale;
+    const renderedHeight = surfaceHeight * scale;
+    const offsetX = (frame.viewportWidth - renderedWidth) / 2;
+    const offsetY = (frame.viewportHeight - renderedHeight) / 2;
+    const x = Math.max(0, Math.min(surfaceWidth, (frame.x - offsetX) / scale));
+    const y = Math.max(0, Math.min(surfaceHeight, (frame.y - offsetY) / scale));
+    const width = Math.max(1, Math.min(surfaceWidth - x, frame.width / scale));
+    const height = Math.max(1, Math.min(surfaceHeight - y, frame.height / scale));
+    return roundRect({ x, y, width, height, surfaceWidth, surfaceHeight, scale, offsetX, offsetY });
+  }
+
+  function getVisibleVideoSourceCrop(video = videoRef.current) {
+    if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
+    return mapVisibleFrameToSurface(video.videoWidth, video.videoHeight);
+  }
+
+  function syncGeometryDiagnostics() {
+    const visibleScanFrame = getVisibleScanFrameRect();
+    const visibleSourceCrop = getVisibleVideoSourceCrop();
+    updateDiagnostics({ visibleScanFrame, visibleSourceCrop });
+  }
+
   function syncVideoDiagnostics(video, engine) {
     if (!video) return;
     const track = video.srcObject?.getVideoTracks?.()[0] || streamRef.current?.getVideoTracks?.()[0];
+    const streamStarted = Boolean(track && track.readyState === "live");
     updateDiagnostics({
-      streamStarted: Boolean(track && track.readyState === "live"),
+      streamStarted,
+      cameraStreamStatus: streamStarted ? "live" : track?.readyState || "no live track",
       video: {
         readyState: video.readyState,
         width: video.videoWidth,
@@ -2629,6 +2699,8 @@ function ScanScreen({
         paused: video.paused
       },
       trackSettings: getTrackSettings(track),
+      visibleScanFrame: getVisibleScanFrameRect(),
+      visibleSourceCrop: getVisibleVideoSourceCrop(video),
       activeDecoder: engine,
       lastError: ""
     }, `${engine} camera ready`);
@@ -2648,12 +2720,55 @@ function ScanScreen({
   }
 
   function stopZxingDetection() {
+    if (zxingFallbackTimerRef.current) {
+      window.clearTimeout(zxingFallbackTimerRef.current);
+      zxingFallbackTimerRef.current = null;
+    }
     if (zxingTimerRef.current) {
       window.clearTimeout(zxingTimerRef.current);
       zxingTimerRef.current = null;
     }
     zxingReaderRef.current = null;
     zxingCanvasRef.current = null;
+  }
+
+  function getHtml5DecoderName(scanner = html5ScannerRef.current) {
+    const decoderName = scanner?.qrcode?.primaryDecoder?.createDebugData?.()?.decoderName || "unknown";
+    return decoderName === "BarcodeDetector"
+      ? "native BarcodeDetector via html5-qrcode"
+      : `html5-qrcode ${decoderName}`;
+  }
+
+  function createHtml5Qrbox(viewWidth, viewHeight) {
+    const visibleScanFrame = getVisibleScanFrameRect();
+    const mappedCrop = mapVisibleFrameToSurface(viewWidth, viewHeight);
+    const requestedWidth = Math.round(mappedCrop?.width || viewWidth * 0.3);
+    const requestedHeight = Math.round(mappedCrop?.height || viewHeight * 0.18);
+    const width = Math.max(50, Math.min(requestedWidth, Math.floor(viewWidth)));
+    const height = Math.max(50, Math.min(requestedHeight, Math.floor(viewHeight)));
+    const decoderCrop = roundRect({
+      engine: "html5-qrcode",
+      coordinateSpace: "decoder video client pixels",
+      x: (viewWidth - width) / 2,
+      y: (viewHeight - height) / 2,
+      width,
+      height,
+      surfaceWidth: viewWidth,
+      surfaceHeight: viewHeight,
+      mappedVisibleX: mappedCrop?.x ?? null,
+      mappedVisibleY: mappedCrop?.y ?? null,
+      alignmentDeltaX: mappedCrop ? (viewWidth - width) / 2 - mappedCrop.x : null,
+      alignmentDeltaY: mappedCrop ? (viewHeight - height) / 2 - mappedCrop.y : null
+    });
+    updateDiagnostics({
+      visibleScanFrame,
+      decoderCrop,
+      decoderCrops: {
+        ...diagnosticsRef.current.decoderCrops,
+        html5Qrcode: decoderCrop
+      }
+    }, "html5-qrcode crop aligned");
+    return { width, height };
   }
 
   function pauseHtml5Detection() {
@@ -2697,6 +2812,12 @@ function ScanScreen({
     streamRef.current = null;
     scanResolvedRef.current = false;
     if (videoRef.current) videoRef.current.srcObject = null;
+    updateDiagnostics({
+      streamStarted: false,
+      cameraStreamStatus: "stopped",
+      activeDecoder: "none",
+      video: { readyState: 0, width: 0, height: 0, paused: true }
+    });
   }
 
   useEffect(() => {
@@ -2754,10 +2875,6 @@ function ScanScreen({
       verbose: false
     });
     html5ScannerRef.current = scanner;
-    const qrbox = (viewWidth, viewHeight) => ({
-      width: Math.max(180, Math.min(Math.floor(viewWidth * 0.86), 340)),
-      height: Math.max(90, Math.min(Math.floor(viewHeight * 0.3), 160))
-    });
     const videoConstraints = {
       facingMode: { ideal: "environment" },
       width: { ideal: 1280 },
@@ -2767,7 +2884,7 @@ function ScanScreen({
       { facingMode: useIdealConstraints ? { ideal: "environment" } : "environment" },
       {
         fps: 6,
-        qrbox,
+        qrbox: createHtml5Qrbox,
         aspectRatio: 16 / 9,
         disableFlip: true,
         ...(useIdealConstraints ? { videoConstraints } : {})
@@ -2793,6 +2910,10 @@ function ScanScreen({
       video.setAttribute("autoplay", "");
       await video.play().catch(() => undefined);
       streamRef.current = video.srcObject;
+      if (videoRef.current && video.srcObject) {
+        videoRef.current.srcObject = video.srcObject;
+        await videoRef.current.play().catch(() => undefined);
+      }
     }
     if (cameraTimerRef.current) {
       window.clearTimeout(cameraTimerRef.current);
@@ -2801,7 +2922,10 @@ function ScanScreen({
     setCameraEngine("html5");
     setCameraStatus("active");
     setCameraMessage("Camera active - scan barcode or enter it manually.");
-    syncVideoDiagnostics(video, "html5-qrcode");
+    const decoderName = getHtml5DecoderName(scanner);
+    updateDiagnostics({ html5PrimaryDecoder: decoderName, activeDecoder: decoderName });
+    syncVideoDiagnostics(videoRef.current || video, decoderName);
+    scheduleZxingFallback();
     return true;
   }
 
@@ -2823,6 +2947,14 @@ function ScanScreen({
     }
   }
 
+  function scheduleZxingFallback(delay = 2400) {
+    if (zxingFallbackTimerRef.current) window.clearTimeout(zxingFallbackTimerRef.current);
+    zxingFallbackTimerRef.current = window.setTimeout(() => {
+      zxingFallbackTimerRef.current = null;
+      if (!scanResolvedRef.current && streamRef.current) void startZxingDetection();
+    }, delay);
+  }
+
   async function startZxingDetection() {
     if (!videoRef.current || !streamRef.current || scanResolvedRef.current || zxingReaderRef.current) return false;
     try {
@@ -2834,21 +2966,52 @@ function ScanScreen({
       });
       zxingReaderRef.current = reader;
       zxingCanvasRef.current = document.createElement("canvas");
-      updateDiagnostics({ zxingLoaded: true, activeDecoder: "zxing-crop", lastError: "" }, "ZXing fallback loaded");
+      const alongsideHtml5 = Boolean(html5ScannerRef.current?.isScanning);
+      const activeDecoder = alongsideHtml5
+        ? `${getHtml5DecoderName()} + cropped ZXing`
+        : "cropped ZXing";
+      updateDiagnostics({ zxingLoaded: true, activeDecoder, lastError: "" }, "ZXing fallback loaded");
 
       const scanFrame = () => {
         const video = videoRef.current;
         const canvas = zxingCanvasRef.current;
         if (!video || !canvas || !zxingReaderRef.current || scanResolvedRef.current) return;
         if (video.readyState >= 2 && video.videoWidth > 0) {
-          const cropWidth = Math.floor(video.videoWidth * 0.9);
-          const cropHeight = Math.floor(video.videoHeight * 0.36);
-          const sourceX = Math.floor((video.videoWidth - cropWidth) / 2);
-          const sourceY = Math.floor((video.videoHeight - cropHeight) / 2);
-          canvas.width = Math.min(cropWidth, 1280);
-          canvas.height = Math.max(120, Math.floor(canvas.width * (cropHeight / cropWidth)));
+          const crop = getVisibleVideoSourceCrop(video);
+          if (!crop) {
+            zxingTimerRef.current = window.setTimeout(scanFrame, 160);
+            return;
+          }
+          const sourceX = Math.max(0, Math.floor(crop.x));
+          const sourceY = Math.max(0, Math.floor(crop.y));
+          const cropWidth = Math.max(1, Math.min(video.videoWidth - sourceX, Math.round(crop.width)));
+          const cropHeight = Math.max(1, Math.min(video.videoHeight - sourceY, Math.round(crop.height)));
+          canvas.width = cropWidth;
+          canvas.height = cropHeight;
           const context = canvas.getContext("2d", { willReadFrequently: true });
-          context.drawImage(video, sourceX, sourceY, cropWidth, cropHeight, 0, 0, canvas.width, canvas.height);
+          context.drawImage(video, sourceX, sourceY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+          const decoderCrop = roundRect({
+            engine: "cropped ZXing",
+            coordinateSpace: "video source pixels",
+            x: sourceX,
+            y: sourceY,
+            width: cropWidth,
+            height: cropHeight,
+            surfaceWidth: video.videoWidth,
+            surfaceHeight: video.videoHeight
+          });
+          const cropSignature = `${sourceX}:${sourceY}:${cropWidth}:${cropHeight}:${video.videoWidth}:${video.videoHeight}`;
+          if (lastDecoderCropSignatureRef.current !== cropSignature) {
+            lastDecoderCropSignatureRef.current = cropSignature;
+            updateDiagnostics({
+              visibleScanFrame: getVisibleScanFrameRect(),
+              decoderCrop,
+              decoderCrops: {
+                ...diagnosticsRef.current.decoderCrops,
+                zxing: decoderCrop
+              }
+            }, "ZXing crop aligned");
+          }
           recordDecoderFrame("zxing");
           try {
             const result = zxingReaderRef.current.decodeFromCanvas(canvas);
@@ -2924,11 +3087,22 @@ function ScanScreen({
     setCameraEngine("none");
     setCameraStatus("requesting");
     setCameraMessage("Requesting camera permission...");
+    setDebugCropCaptures([]);
+    lastDecoderCropSignatureRef.current = "";
     updateDiagnostics({
       secureContext: window.isSecureContext,
       mediaDevices: Boolean(navigator.mediaDevices?.getUserMedia),
       streamStarted: false,
+      cameraStreamStatus: "requesting permission",
+      html5QrcodeLoaded: false,
+      zxingLoaded: false,
       activeDecoder: "none",
+      decodedFrameCount: 0,
+      frames: { html5Qrcode: 0, zxing: 0 },
+      visibleScanFrame: getVisibleScanFrameRect(),
+      decoderCrop: null,
+      decoderCrops: { html5Qrcode: null, zxing: null },
+      capturedDecoderFrames: [],
       lastError: ""
     }, "camera requested");
     await inspectNativeBarcodeDetector();
@@ -2936,6 +3110,7 @@ function ScanScreen({
     if (!window.isSecureContext) {
       setCameraStatus("unavailable");
       setCameraMessage("Camera access needs HTTPS or localhost. Manual barcode lookup is ready.");
+      updateDiagnostics({ cameraStreamStatus: "blocked by insecure context" });
       openFallback("barcode");
       return;
     }
@@ -2943,6 +3118,7 @@ function ScanScreen({
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraStatus("unavailable");
       setCameraMessage("This browser cannot open the camera. Manual barcode lookup is ready.");
+      updateDiagnostics({ cameraStreamStatus: "getUserMedia unavailable" });
       openFallback("barcode");
       return;
     }
@@ -2951,7 +3127,10 @@ function ScanScreen({
       if (cameraRequestRef.current !== requestId) return;
       setCameraStatus("unavailable");
       setCameraMessage("Camera access is taking longer than expected. Manual lookup is ready.");
-      updateDiagnostics({ lastError: "Camera permission or startup timed out after 7 seconds." }, "camera timeout");
+      updateDiagnostics({
+        cameraStreamStatus: "startup timed out",
+        lastError: "Camera permission or startup timed out after 7 seconds."
+      }, "camera timeout");
       openFallback("barcode");
     }, 7000);
 
@@ -2967,7 +3146,10 @@ function ScanScreen({
       const denied = error?.name === "NotAllowedError" || error?.name === "PermissionDeniedError";
       setCameraStatus(denied ? "denied" : "unavailable");
       setCameraEngine("none");
-      updateDiagnostics({ lastError: `${error?.name || "CameraError"}: ${String(error?.message || error)}` }, "camera failed");
+      updateDiagnostics({
+        cameraStreamStatus: denied ? "permission denied" : "unavailable",
+        lastError: `${error?.name || "CameraError"}: ${String(error?.message || error)}`
+      }, "camera failed");
       setCameraMessage(
         denied
           ? "Camera permission denied. You can still use manual barcode lookup."
@@ -3005,6 +3187,89 @@ function ScanScreen({
       }
       setBarcodePhotoLoading(false);
     }
+  }
+
+  function createVisibleCropCanvas() {
+    const video = videoRef.current;
+    const crop = getVisibleVideoSourceCrop(video);
+    if (!video || !crop) return null;
+    const sourceX = Math.max(0, Math.floor(crop.x));
+    const sourceY = Math.max(0, Math.floor(crop.y));
+    const width = Math.max(1, Math.min(video.videoWidth - sourceX, Math.round(crop.width)));
+    const height = Math.max(1, Math.min(video.videoHeight - sourceY, Math.round(crop.height)));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d", { willReadFrequently: true })?.drawImage(
+      video,
+      sourceX,
+      sourceY,
+      width,
+      height,
+      0,
+      0,
+      width,
+      height
+    );
+    return canvas;
+  }
+
+  function captureDecoderFrames() {
+    syncGeometryDiagnostics();
+    const sources = [
+      {
+        engine: getHtml5DecoderName(),
+        canvas: html5ScannerRef.current?.canvasElement,
+        crop: diagnosticsRef.current.decoderCrops?.html5Qrcode
+      },
+      {
+        engine: "cropped ZXing",
+        canvas: zxingCanvasRef.current,
+        crop: diagnosticsRef.current.decoderCrops?.zxing
+      }
+    ].filter((source) => source.canvas?.width > 0 && source.canvas?.height > 0);
+
+    if (!sources.length) {
+      const canvas = createVisibleCropCanvas();
+      if (canvas) {
+        sources.push({
+          engine: "visible frame preview",
+          canvas,
+          crop: getVisibleVideoSourceCrop()
+        });
+      }
+    }
+
+    try {
+      const capturedAt = new Date().toISOString();
+      const captures = sources.map((source, index) => ({
+        engine: source.engine,
+        src: source.canvas.toDataURL("image/png"),
+        width: source.canvas.width,
+        height: source.canvas.height,
+        crop: source.crop,
+        downloadName: `ziya-decoder-crop-${index + 1}.png`
+      }));
+      if (!captures.length) throw new Error("No live decoder frame is available yet.");
+      setDebugCropCaptures(captures);
+      updateDiagnostics({
+        capturedDecoderFrames: captures.map(({ engine, width, height, crop }) => ({
+          engine,
+          width,
+          height,
+          crop,
+          capturedAt
+        })),
+        lastError: ""
+      }, "decoder crop captured");
+    } catch (error) {
+      updateDiagnostics({ lastError: `Capture decoder frame: ${String(error?.message || error)}` }, "decoder crop capture failed");
+    }
+  }
+
+  function toggleDiagnostics() {
+    if (!diagnosticsOpen) syncGeometryDiagnostics();
+    setDiagnosticsOpen((value) => !value);
   }
 
   async function toggleFlash() {
@@ -3165,10 +3430,19 @@ function ScanScreen({
 
   function resumeDetection() {
     scanResolvedRef.current = false;
+    if (cameraStatus !== "active") {
+      setCameraMessage(
+        cameraStatus === "denied"
+          ? "Camera permission denied. Manual barcode lookup is ready."
+          : "Camera unavailable. Manual barcode lookup is ready."
+      );
+      return;
+    }
     setCameraMessage("Camera active - scan barcode or enter it manually.");
     if (cameraEngine === "html5" && html5ScannerRef.current?.isScanning) {
       try {
         html5ScannerRef.current.resume();
+        scheduleZxingFallback();
         return;
       } catch {
         // The scanner may already be running.
@@ -3213,18 +3487,18 @@ function ScanScreen({
   }
 
   return (
-    <div className="scanner-live">
+    <div className="scanner-live" ref={scannerLiveRef}>
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className={cameraStatus === "active" && cameraEngine === "zxing" ? "scanner-video is-active" : "scanner-video"}
+        className={cameraStatus === "active" ? "scanner-video is-active" : "scanner-video"}
       />
       <div
         id="ziya-html5-reader"
         ref={html5ContainerRef}
-        className={cameraStatus === "active" && cameraEngine === "html5" ? "scanner-html5-reader is-active" : "scanner-html5-reader"}
+        className="scanner-html5-reader"
       />
       <div className="scanner-fallback-bg" />
       <div className="scanner-shade" />
@@ -3241,14 +3515,15 @@ function ScanScreen({
         </button>
       </div>
 
+      <div className="scan-corners" ref={scanFrameRef}>
+        <span />
+        <span />
+        <span />
+        <span />
+        {cameraStatus === "active" && <i />}
+      </div>
+
       <div className="scanner-center">
-        <div className="scan-corners">
-          <span />
-          <span />
-          <span />
-          <span />
-          {cameraStatus === "active" && <i />}
-        </div>
         <p>
           {cameraStatus === "requesting"
             ? "Requesting camera"
@@ -3308,7 +3583,9 @@ function ScanScreen({
           diagnostics={diagnosticsRef.current}
           version={diagnosticsVersion}
           open={diagnosticsOpen}
-          setOpen={setDiagnosticsOpen}
+          onToggle={toggleDiagnostics}
+          onCapture={captureDecoderFrames}
+          captures={debugCropCaptures}
         />
       )}
 
@@ -3360,14 +3637,14 @@ function ScanScreen({
   );
 }
 
-function ScannerDiagnosticsPanel({ diagnostics, version, open, setOpen }) {
+function ScannerDiagnosticsPanel({ diagnostics, version, open, onToggle, onCapture, captures }) {
   return (
     <aside className={`scanner-diagnostics ${open ? "is-open" : ""}`} data-version={version}>
       <button
         className="scanner-diagnostics-toggle"
         aria-expanded={open}
         aria-controls="scanner-diagnostics-body"
-        onClick={() => setOpen((value) => !value)}
+        onClick={onToggle}
       >
         {open ? "Close diagnostics" : "Scanner diagnostics"}
       </button>
@@ -3375,11 +3652,22 @@ function ScannerDiagnosticsPanel({ diagnostics, version, open, setOpen }) {
         <div id="scanner-diagnostics-body" className="scanner-diagnostics-body">
           <strong>Developer scanner snapshot</strong>
           <pre>{JSON.stringify(diagnostics, null, 2)}</pre>
-          <button
-            onClick={() => navigator.clipboard?.writeText(JSON.stringify(diagnostics, null, 2))}
-          >
-            Copy diagnostics
-          </button>
+          <div className="scanner-diagnostics-actions">
+            <button onClick={onCapture}>Capture decoder frame</button>
+            <button onClick={() => navigator.clipboard?.writeText(JSON.stringify(diagnostics, null, 2))}>
+              Copy diagnostics
+            </button>
+          </div>
+          {captures.map((capture) => (
+            <figure className="scanner-debug-crop" key={`${capture.engine}-${capture.width}-${capture.height}`}>
+              <figcaption>{capture.engine} - {capture.width} x {capture.height}</figcaption>
+              <img src={capture.src} alt={`Exact crop sent to ${capture.engine}`} />
+              <a href={capture.src} download={capture.downloadName}>Save crop image</a>
+            </figure>
+          ))}
+          <p className="scanner-diagnostics-comparison">
+            Try the same barcode in the official <a href="https://scanapp.org/" target="_blank" rel="noreferrer">ScanApp demo</a> on this phone and browser. If it scans there but not here, compare the crop above. If both fail, test better light, focus, or a still barcode photo.
+          </p>
         </div>
       )}
     </aside>
