@@ -7,9 +7,11 @@ import {
   Barcode,
   Bell,
   BookOpen,
+  CalendarDays,
   Camera,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Copy,
   Droplets,
@@ -21,6 +23,7 @@ import {
   Info,
   Leaf,
   Minus,
+  Pencil,
   Pill,
   Plus,
   Search,
@@ -29,6 +32,7 @@ import {
   Sparkles,
   Star,
   Target,
+  Trash2,
   User,
   Utensils,
   Volume2,
@@ -966,15 +970,6 @@ const categoryExamples = {
   textile: ["Cotton Shirts", "Polyester Shirts", "Towels", "Body Scrubbers", "Bedding", "Baby Textiles"]
 };
 
-const dailyLogSeed = [
-  { id: "daily-1", name: "Protein Bar", calories: 220, protein: 20, carbs: 22, fat: 8 },
-  { id: "daily-2", name: "Popcorn", calories: 120, protein: 2, carbs: 14, fat: 7 },
-  { id: "daily-3", name: "Greek yogurt bowl", calories: 310, protein: 28, carbs: 36, fat: 6 },
-  { id: "daily-4", name: "Turkey sandwich", calories: 410, protein: 32, carbs: 42, fat: 12 },
-  { id: "daily-5", name: "Coffee with milk", calories: 90, protein: 4, carbs: 9, fat: 3 },
-  { id: "daily-6", name: "Apple", calories: 95, protein: 0, carbs: 25, fat: 0 }
-];
-
 const recommendationPairs = [
   { bad: "pop-secret", good: "skinny-pop" },
   { bad: "detergent", good: "free-detergent" },
@@ -1413,26 +1408,30 @@ function mapOpenFoodFactsIngredients(product) {
 
 function mapOpenFoodFactsNutrition(product) {
   const nutriments = product.nutriments || {};
-  const calories = firstNumber(
-    nutriments["energy-kcal_serving"],
-    nutriments["energy-kcal_100g"],
-    nutriments["energy-kcal"],
-    hasNumber(toNumber(nutriments["energy-kj_serving"])) ? toNumber(nutriments["energy-kj_serving"]) / 4.184 : null,
-    hasNumber(toNumber(nutriments["energy-kj_100g"])) ? toNumber(nutriments["energy-kj_100g"]) / 4.184 : null
-  );
-  const sodiumGrams = firstNumber(nutriments.sodium_serving, nutriments.sodium_100g, nutriments.sodium);
-  const saltGrams = firstNumber(nutriments.salt_serving, nutriments.salt_100g, nutriments.salt);
+  const hasServingBasis = hasNumber(toNumber(nutriments["energy-kcal_serving"]))
+    && ["proteins_serving", "carbohydrates_serving", "fat_serving"].some((key) => hasNumber(toNumber(nutriments[key])));
+  const hasPer100MlBasis = hasNumber(toNumber(nutriments["energy-kcal_100ml"]))
+    && ["proteins_100ml", "carbohydrates_100ml", "fat_100ml"].some((key) => hasNumber(toNumber(nutriments[key])));
+  const basis = hasServingBasis ? "serving" : hasPer100MlBasis ? "100ml" : "100g";
+  const suffix = basis === "serving" ? "serving" : basis === "100ml" ? "100ml" : "100g";
+  const valueFor = (name) => toNumber(nutriments[`${name}_${suffix}`]);
+  const energyKcal = valueFor("energy-kcal");
+  const energyKj = valueFor("energy-kj");
+  const calories = hasNumber(energyKcal) ? energyKcal : hasNumber(energyKj) ? energyKj / 4.184 : null;
+  const sodiumGrams = valueFor("sodium");
+  const saltGrams = valueFor("salt");
   const sodiumMg = hasNumber(sodiumGrams) ? sodiumGrams * 1000 : hasNumber(saltGrams) ? saltGrams * 400 : null;
   return {
-    servingSize: cleanText(product.serving_size) || "Per label data",
+    servingSize: cleanText(product.serving_size) || (basis === "100ml" ? "Per 100 ml" : basis === "100g" ? "Per 100 g" : "1 serving"),
+    basis,
     calories: roundNutrient(calories, 0),
-    protein: roundNutrient(firstNumber(nutriments.proteins_serving, nutriments.proteins_100g, nutriments.proteins), 1),
-    carbs: roundNutrient(firstNumber(nutriments.carbohydrates_serving, nutriments.carbohydrates_100g, nutriments.carbohydrates), 1),
-    fat: roundNutrient(firstNumber(nutriments.fat_serving, nutriments.fat_100g, nutriments.fat), 1),
-    sugar: roundNutrient(firstNumber(nutriments.sugars_serving, nutriments.sugars_100g, nutriments.sugars), 1),
+    protein: roundNutrient(valueFor("proteins"), 1),
+    carbs: roundNutrient(valueFor("carbohydrates"), 1),
+    fat: roundNutrient(valueFor("fat"), 1),
+    sugar: roundNutrient(valueFor("sugars"), 1),
     sodium: roundNutrient(sodiumMg, 0),
-    saturatedFat: roundNutrient(firstNumber(nutriments["saturated-fat_serving"], nutriments["saturated-fat_100g"], nutriments["saturated-fat"]), 1),
-    fiber: roundNutrient(firstNumber(nutriments.fiber_serving, nutriments.fiber_100g, nutriments.fiber), 1)
+    saturatedFat: roundNutrient(valueFor("saturated-fat"), 1),
+    fiber: roundNutrient(valueFor("fiber"), 1)
   };
 }
 
@@ -2187,6 +2186,7 @@ function createReportFromOcr(review, capturedPhoto) {
 function normalizeNutrition(nutrition = {}) {
   return {
     servingSize: nutrition.servingSize || "Not available",
+    basis: ["serving", "100g", "100ml"].includes(nutrition.basis) ? nutrition.basis : "serving",
     calories: toNumber(nutrition.calories),
     protein: toNumber(nutrition.protein),
     carbs: toNumber(nutrition.carbs),
@@ -2195,6 +2195,205 @@ function normalizeNutrition(nutrition = {}) {
     sodium: toNumber(nutrition.sodium),
     saturatedFat: toNumber(nutrition.saturatedFat),
     fiber: toNumber(nutrition.fiber)
+  };
+}
+
+const PLATE_STORAGE_KEY = "ziya-todays-plate-v1";
+const PLATE_NUTRIENTS = ["calories", "protein", "carbs", "fat", "fiber", "sugar", "sodium"];
+const PLATE_DEFAULT_GOALS = Object.freeze({
+  calories: 2000,
+  protein: 120,
+  carbs: 250,
+  fat: 70,
+  fiber: 28,
+  sugar: 50,
+  sodium: 2300
+});
+const PLATE_NUTRIENT_META = Object.freeze({
+  calories: { label: "Calories", unit: "kcal", tone: "calories", goalWord: "goal" },
+  protein: { label: "Protein", unit: "g", tone: "protein", goalWord: "goal" },
+  carbs: { label: "Carbohydrates", shortLabel: "Carbs", unit: "g", tone: "carbs", goalWord: "goal" },
+  fat: { label: "Fat", unit: "g", tone: "fat", goalWord: "goal" },
+  fiber: { label: "Fiber", unit: "g", tone: "fiber", goalWord: "goal" },
+  sugar: { label: "Sugar", unit: "g", tone: "sugar", goalWord: "limit" },
+  sodium: { label: "Sodium", unit: "mg", tone: "sodium", goalWord: "limit" }
+});
+
+function getLocalDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateFromLocalKey(key) {
+  const [year, month, day] = String(key).split("-").map(Number);
+  return new Date(year, Math.max(0, month - 1), day || 1, 12);
+}
+
+function shiftLocalDateKey(key, days) {
+  const date = dateFromLocalKey(key);
+  date.setDate(date.getDate() + days);
+  return getLocalDateKey(date);
+}
+
+function formatPlateDate(key) {
+  const todayKey = getLocalDateKey();
+  if (key === todayKey) return "Today";
+  return dateFromLocalKey(key).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+function sanitizePlateGoals(input) {
+  if (!input || typeof input !== "object") return null;
+  const next = {};
+  for (const nutrient of PLATE_NUTRIENTS) {
+    const value = toNumber(input[nutrient]);
+    if (!hasNumber(value) || value <= 0) return null;
+    next[nutrient] = value;
+  }
+  return next;
+}
+
+function sanitizePlateEntry(entry) {
+  if (!entry || typeof entry !== "object" || !entry.id || !entry.product?.name) return null;
+  const nutritionBase = normalizeNutrition(entry.nutritionBase || {});
+  const amount = toNumber(entry.amount);
+  if (!hasNumber(amount) || amount <= 0) return null;
+  return {
+    ...entry,
+    amount,
+    mode: ["servings", "grams", "milliliters"].includes(entry.mode) ? entry.mode : "servings",
+    nutritionBase,
+    contribution: normalizeNutrition(entry.contribution || {})
+  };
+}
+
+function loadPlateState() {
+  const empty = { goals: null, days: {} };
+  if (typeof window === "undefined") return empty;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PLATE_STORAGE_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") return empty;
+    const days = {};
+    Object.entries(parsed.days || {}).forEach(([key, day]) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || !day || typeof day !== "object") return;
+      days[key] = {
+        goalsSnapshot: sanitizePlateGoals(day.goalsSnapshot),
+        entries: asArray(day.entries).map(sanitizePlateEntry).filter(Boolean)
+      };
+    });
+    return { goals: sanitizePlateGoals(parsed.goals), days };
+  } catch {
+    return empty;
+  }
+}
+
+function getNutritionLogProfile(product) {
+  if (product?.category !== "food" || !hasCoreFoodNutrition(product.nutrition || {})) return null;
+  const basis = product.nutrition?.basis || "serving";
+  const servingSize = cleanText(product.nutrition?.servingSize);
+  if (basis === "100g") {
+    const grams = parseServingMeasure(servingSize, "g");
+    return { mode: "grams", amount: grams || 100, step: 10, unit: "g", label: grams ? servingSize : "Per 100 g" };
+  }
+  if (basis === "100ml") {
+    const milliliters = parseServingMeasure(servingSize, "ml");
+    return { mode: "milliliters", amount: milliliters || 100, step: 10, unit: "ml", label: milliliters ? servingSize : "Per 100 ml" };
+  }
+  return { mode: "servings", amount: 1, step: 0.5, unit: "serving", label: product.nutrition?.servingSize || "1 serving" };
+}
+
+function parseServingMeasure(value, unit) {
+  if (!value) return null;
+  const pattern = unit === "ml" ? /(\d+(?:\.\d+)?)\s*ml\b/i : /(\d+(?:\.\d+)?)\s*g\b/i;
+  const amount = toNumber(String(value).match(pattern)?.[1]);
+  return hasNumber(amount) && amount > 0 ? amount : null;
+}
+
+function normalizeNutritionForServing(product, amount, mode) {
+  const nutrition = normalizeNutrition(product.nutrition || {});
+  const numericAmount = toNumber(amount);
+  if (!hasNumber(numericAmount) || numericAmount <= 0) return null;
+  const scale = mode === "servings" ? numericAmount : numericAmount / 100;
+  const result = { servingSize: nutrition.servingSize, basis: nutrition.basis };
+  PLATE_NUTRIENTS.forEach((nutrient) => {
+    result[nutrient] = hasNumber(nutrition[nutrient]) ? nutrition[nutrient] * scale : null;
+  });
+  result.saturatedFat = hasNumber(nutrition.saturatedFat) ? nutrition.saturatedFat * scale : null;
+  return result;
+}
+
+function calculateDailyTotals(entries = []) {
+  const totals = {};
+  PLATE_NUTRIENTS.forEach((nutrient) => {
+    const known = entries.filter((entry) => hasNumber(entry.contribution?.[nutrient]));
+    totals[nutrient] = {
+      total: known.reduce((sum, entry) => sum + entry.contribution[nutrient], 0),
+      knownCount: known.length,
+      missingCount: entries.length - known.length
+    };
+  });
+  return totals;
+}
+
+function formatNutrientValue(value, nutrient) {
+  if (!hasNumber(value)) return "Missing";
+  const digits = Number.isInteger(value) ? 0 : nutrient === "calories" || nutrient === "sodium" ? 1 : 2;
+  return value.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+function createPlateEntry(product, amount, mode) {
+  const contribution = normalizeNutritionForServing(product, amount, mode);
+  if (!contribution) return null;
+  return {
+    id: `plate-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    productId: product.id,
+    product: {
+      id: product.id,
+      name: product.name,
+      brand: product.brand,
+      category: product.category,
+      image: product.image,
+      userPhoto: product.userPhoto?.length < 250000 ? product.userPhoto : undefined
+    },
+    nutritionBase: normalizeNutrition(product.nutrition),
+    amount,
+    mode,
+    contribution,
+    addedAt: new Date().toISOString()
+  };
+}
+
+function updatePlateEntryInState(state, dateKey, entryId, amount) {
+  const day = state.days[dateKey];
+  const numericAmount = toNumber(amount);
+  if (!day || !hasNumber(numericAmount) || numericAmount <= 0) return state;
+  return {
+    ...state,
+    days: {
+      ...state.days,
+      [dateKey]: {
+        ...day,
+        entries: day.entries.map((entry) => {
+          if (entry.id !== entryId) return entry;
+          const product = { ...entry.product, nutrition: entry.nutritionBase };
+          const contribution = normalizeNutritionForServing(product, numericAmount, entry.mode);
+          return contribution ? { ...entry, amount: numericAmount, contribution } : entry;
+        })
+      }
+    }
+  };
+}
+
+function removePlateEntryFromState(state, dateKey, entryId) {
+  const day = state.days[dateKey];
+  if (!day) return state;
+  return {
+    ...state,
+    days: {
+      ...state.days,
+      [dateKey]: { ...day, entries: day.entries.filter((entry) => entry.id !== entryId) }
+    }
   };
 }
 
@@ -2224,7 +2423,10 @@ function App() {
   const [ocrReview, setOcrReview] = useState(null);
   const [activeIngredient, setActiveIngredient] = useState(null);
   const [expandedSection, setExpandedSection] = useState(null);
-  const [dailyLog, setDailyLog] = useState(dailyLogSeed);
+  const [plateState, setPlateState] = useState(loadPlateState);
+  const [todayKey, setTodayKey] = useState(getLocalDateKey);
+  const [servingProduct, setServingProduct] = useState(null);
+  const [plateEntryTarget, setPlateEntryTarget] = useState(null);
   const [actionOpen, setActionOpen] = useState(false);
   const [messageTone, setMessageTone] = useState("Polite");
   const [platform, setPlatform] = useState("Instagram");
@@ -2247,16 +2449,25 @@ function App() {
     return () => document.body.classList.remove("scan-lock");
   }, [activeTab]);
 
-  const dailyTotals = dailyLog.reduce(
-    (acc, item) => {
-      acc.calories += item.calories;
-      acc.protein += item.protein;
-      acc.carbs += item.carbs;
-      acc.fat += item.fat;
-      return acc;
-    },
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
-  );
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PLATE_STORAGE_KEY, JSON.stringify(plateState));
+    } catch {
+      // Today’s Plate stays usable for the session when storage is unavailable.
+    }
+  }, [plateState]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const nextKey = getLocalDateKey();
+      setTodayKey((current) => current === nextKey ? current : nextKey);
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const dailyLog = plateState.days[todayKey]?.entries || [];
+  const plateTotals = calculateDailyTotals(dailyLog);
+  const dailyTotals = Object.fromEntries(PLATE_NUTRIENTS.map((nutrient) => [nutrient, plateTotals[nutrient].total]));
 
   function openProduct(productId) {
     setSelectedProductId(productId);
@@ -2390,23 +2601,66 @@ function App() {
   }
 
   function addToDailyLog(product) {
-    if (product.category !== "food" || !product.nutrition || !hasNumber(product.nutrition.calories)) return;
-    setDailyLog((items) => [
-      {
-        id: `${product.id}-${Date.now()}`,
-        name: product.name,
-        calories: product.nutrition.calories,
-        protein: product.nutrition.protein || 0,
-        carbs: product.nutrition.carbs || 0,
-        fat: product.nutrition.fat || 0
-      },
-      ...items
-    ]);
+    if (!getNutritionLogProfile(product)) return;
+    setServingProduct(product);
+  }
+
+  function savePlateGoals(goals) {
+    const validated = sanitizePlateGoals(goals);
+    if (!validated) return false;
+    const key = getLocalDateKey();
+    setPlateState((current) => ({
+      goals: validated,
+      days: {
+        ...current.days,
+        [key]: {
+          goalsSnapshot: validated,
+          entries: current.days[key]?.entries || []
+        }
+      }
+    }));
+    return true;
+  }
+
+  function addPlateServing(product, amount, mode) {
+    const entry = createPlateEntry(product, amount, mode);
+    if (!entry) return false;
+    const key = getLocalDateKey();
+    setPlateState((current) => ({
+      ...current,
+      days: {
+        ...current.days,
+        [key]: {
+          goalsSnapshot: current.days[key]?.goalsSnapshot || current.goals || { ...PLATE_DEFAULT_GOALS },
+          entries: [entry, ...(current.days[key]?.entries || [])]
+        }
+      }
+    }));
+    setServingProduct(null);
+    return true;
+  }
+
+  function updatePlateEntry(dateKey, entryId, amount) {
+    setPlateState((current) => updatePlateEntryInState(current, dateKey, entryId, amount));
+  }
+
+  function removePlateEntry(dateKey, entryId) {
+    setPlateState((current) => removePlateEntryFromState(current, dateKey, entryId));
+    setPlateEntryTarget(null);
   }
 
   function renderActiveView() {
     if (activeTab === "history") {
-      return <HistoryScreen history={scanHistory} productIndex={productIndex} onOpenProduct={openProduct} />;
+      return (
+        <HistoryScreen
+          history={scanHistory}
+          productIndex={productIndex}
+          onOpenProduct={openProduct}
+          plateState={plateState}
+          onSaveGoals={savePlateGoals}
+          onOpenPlateEntry={setPlateEntryTarget}
+        />
+      );
     }
     if (activeTab === "search") {
       return (
@@ -2428,7 +2682,7 @@ function App() {
       return <TopScreen productIndex={productIndex} realProducts={realProducts} onOpenProduct={openProduct} />;
     }
     if (activeTab === "profile") {
-      return <ProfileScreen dailyTotals={dailyTotals} dailyLog={dailyLog} />;
+      return <ProfileScreen dailyTotals={dailyTotals} dailyLog={dailyLog} goals={plateState.goals} />;
     }
     if (activeTab === "report") {
       return (
@@ -2502,6 +2756,24 @@ function App() {
         <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} />
         {activeIngredient && (
           <IngredientSheet ingredient={activeIngredient} onClose={() => setActiveIngredient(null)} />
+        )}
+        {servingProduct && (
+          <ServingSheet
+            key={servingProduct.id}
+            product={servingProduct}
+            onClose={() => setServingProduct(null)}
+            onAdd={addPlateServing}
+          />
+        )}
+        {plateEntryTarget && (
+          <FoodContributionSheet
+            key={`${plateEntryTarget.dateKey}-${plateEntryTarget.entryId}`}
+            target={plateEntryTarget}
+            plateState={plateState}
+            onClose={() => setPlateEntryTarget(null)}
+            onUpdate={updatePlateEntry}
+            onRemove={removePlateEntry}
+          />
         )}
       </div>
     </div>
@@ -4920,6 +5192,14 @@ function ReportScreen({
         </div>
       </section>
 
+      {product.category === "food" && (
+        <PlateReportAction
+          product={product}
+          alreadyAdded={dailyLog?.some((entry) => entry.productId === product.id)}
+          onAdd={() => onAddToDailyLog(product)}
+        />
+      )}
+
       {isMedicine ? (
         <>
           <MedicineSummary product={product} />
@@ -4981,7 +5261,7 @@ function ReportScreen({
                 expandedSection={expandedSection}
                 setExpandedSection={setExpandedSection}
               >
-                <FoodNutrition product={product} onAddToDailyLog={onAddToDailyLog} embedded />
+                <FoodNutrition product={product} embedded />
               </ExpandableSection>
 
               <ExpandableSection
@@ -5373,9 +5653,8 @@ function MedicineSummary({ product }) {
   );
 }
 
-function FoodNutrition({ product, onAddToDailyLog, embedded = false }) {
+function FoodNutrition({ product, embedded = false }) {
   const n = product.nutrition || {};
-  const canLog = hasNumber(n.calories);
   const rows = getAvailableNutritionRows(n);
   return (
     <section className={`${embedded ? "nutrition-card-embedded" : "card nutrition-card"}`}>
@@ -5394,11 +5673,22 @@ function FoodNutrition({ product, onAddToDailyLog, embedded = false }) {
       ) : (
         <MissingReportData copy="Nutrition facts are not available. Add the label to complete this section." />
       )}
-      <button className="primary-button full" onClick={() => onAddToDailyLog(product)} disabled={!canLog}>
-        <Plus size={18} />
-        {canLog ? "Add to Daily Log" : "Calories missing"}
-      </button>
     </section>
+  );
+}
+
+function PlateReportAction({ product, alreadyAdded, onAdd }) {
+  const profile = getNutritionLogProfile(product);
+  const canLog = Boolean(profile);
+  return (
+    <button className={`plate-report-action ${canLog ? "" : "is-disabled"}`} onClick={onAdd} disabled={!canLog}>
+      <span className="plate-action-icon"><Utensils size={18} /></span>
+      <span>
+        <strong>{canLog ? (alreadyAdded ? "Add another serving" : "Add to Today’s Plate") : "Nutrition label needed"}</strong>
+        <small>{canLog ? profile.label : "Add nutrition facts first"}</small>
+      </span>
+      {canLog && <ChevronRight size={19} />}
+    </button>
   );
 }
 
@@ -5673,22 +5963,237 @@ function RecommendationTile({ product, icon, role, onOpenProduct }) {
   );
 }
 
-function HistoryScreen({ history, productIndex, onOpenProduct }) {
+function HistoryScreen({ history, productIndex, onOpenProduct, plateState, onSaveGoals, onOpenPlateEntry }) {
+  const [view, setView] = useState("today");
   const today = history.filter((item) => item.date.startsWith("Today"));
   const yesterday = history.filter((item) => item.date.startsWith("Yesterday"));
   const earlier = history.filter((item) => !item.date.startsWith("Today") && !item.date.startsWith("Yesterday"));
   return (
-    <div className="stack">
-      <Header eyebrow="History" title="Recently scanned" />
-      {!history.length ? (
-        <EmptyState title="No scans yet" copy="Products you scan will appear here with their image and result." />
+    <div className="stack history-plate-screen">
+      <div className="history-mode-toggle" role="tablist" aria-label="Today’s Plate and scan history">
+        <button role="tab" aria-selected={view === "today"} className={view === "today" ? "active" : ""} onClick={() => setView("today")}>Today</button>
+        <button role="tab" aria-selected={view === "history"} className={view === "history" ? "active" : ""} onClick={() => setView("history")}>History</button>
+      </div>
+      {view === "today" ? (
+        <TodayPlateScreen plateState={plateState} onSaveGoals={onSaveGoals} onOpenPlateEntry={onOpenPlateEntry} />
       ) : (
         <>
-          {today.length > 0 && <HistoryGroup title="Today" items={today} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
-          {yesterday.length > 0 && <HistoryGroup title="Yesterday" items={yesterday} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
-          {earlier.length > 0 && <HistoryGroup title="Earlier" items={earlier} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
+          <Header eyebrow="History" title="Recently scanned" />
+          {!history.length ? (
+            <EmptyState title="No scans yet" copy="Products you scan will appear here with their image and result." />
+          ) : (
+            <>
+              {today.length > 0 && <HistoryGroup title="Today" items={today} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
+              {yesterday.length > 0 && <HistoryGroup title="Yesterday" items={yesterday} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
+              {earlier.length > 0 && <HistoryGroup title="Earlier" items={earlier} productIndex={productIndex} onOpenProduct={onOpenProduct} />}
+            </>
+          )}
         </>
       )}
+    </div>
+  );
+}
+
+function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry }) {
+  const todayKey = getLocalDateKey();
+  const [dateKey, setDateKey] = useState(todayKey);
+  const [editingGoals, setEditingGoals] = useState(false);
+  const [activeNutrient, setActiveNutrient] = useState(null);
+  const day = plateState.days[dateKey];
+  const isToday = dateKey === todayKey;
+  const goals = day?.goalsSnapshot || (isToday ? plateState.goals : null);
+  const entries = day?.entries || [];
+  const totals = calculateDailyTotals(entries);
+
+  useEffect(() => {
+    setDateKey(todayKey);
+  }, [todayKey]);
+
+  if (isToday && (!plateState.goals || editingGoals)) {
+    return (
+      <div className="stack plate-content">
+        <Header eyebrow="Today’s Plate" title={editingGoals ? "Edit daily goals" : "Set your daily goals"} subtitle={editingGoals ? "Update the nutrition targets you want to track." : "Choose the nutrition targets you want to track."} />
+        <GoalSetupCard
+          initialGoals={plateState.goals || PLATE_DEFAULT_GOALS}
+          onCancel={editingGoals ? () => setEditingGoals(false) : null}
+          onSave={(nextGoals) => {
+            if (onSaveGoals(nextGoals)) setEditingGoals(false);
+          }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="stack plate-content">
+      <Header eyebrow="Today’s Plate" title="Today’s Plate" subtitle="Your nutrition progress for today" />
+      <PlateDateControl dateKey={dateKey} todayKey={todayKey} setDateKey={setDateKey} />
+      {!goals ? (
+        <EmptyState title="No foods were logged on this day" copy="Use the previous arrow to review another day." />
+      ) : (
+        <>
+          <CalorieProgress total={totals.calories} goal={goals.calories} onOpen={() => setActiveNutrient("calories")} />
+          <section className="card plate-nutrient-card">
+            <div className="section-heading plate-section-heading">
+              <div><span className="eyebrow">Daily progress</span><h2>Macros</h2></div>
+              <Target size={20} />
+            </div>
+            <div className="plate-progress-list">
+              {["protein", "carbs", "fat"].map((nutrient) => (
+                <NutrientProgress key={nutrient} nutrient={nutrient} total={totals[nutrient]} goal={goals[nutrient]} onOpen={() => setActiveNutrient(nutrient)} />
+              ))}
+            </div>
+          </section>
+          <section className="card plate-nutrient-card">
+            <div className="section-heading plate-section-heading">
+              <div><span className="eyebrow">Also tracking</span><h2>Fiber, sugar, sodium</h2></div>
+            </div>
+            <div className="plate-progress-list">
+              {["fiber", "sugar", "sodium"].map((nutrient) => (
+                <NutrientProgress key={nutrient} nutrient={nutrient} total={totals[nutrient]} goal={goals[nutrient]} onOpen={() => setActiveNutrient(nutrient)} />
+              ))}
+            </div>
+          </section>
+          <section className="card plate-foods-card">
+            <div className="section-heading plate-section-heading">
+              <div><span className="eyebrow">{formatPlateDate(dateKey)}</span><h2>{isToday ? "Foods today" : "Foods logged"}</h2></div>
+              <span className="plate-food-count">{entries.length}</span>
+            </div>
+            {entries.length ? (
+              <div className="plate-food-list">
+                {entries.map((entry) => (
+                  <DailyFoodRow key={entry.id} entry={entry} onClick={() => onOpenPlateEntry({ dateKey, entryId: entry.id })} />
+                ))}
+              </div>
+            ) : (
+              <div className="plate-empty"><Utensils size={20} /><strong>Nothing added yet</strong><span>Scan or search for a food, then add a serving to Today’s Plate.</span></div>
+            )}
+          </section>
+          {isToday && <button className="plate-edit-goals" onClick={() => setEditingGoals(true)}><Pencil size={16} />Edit goals</button>}
+        </>
+      )}
+      {activeNutrient && (
+        <NutrientDetailSheet nutrient={activeNutrient} total={totals[activeNutrient]} goal={goals?.[activeNutrient]} entries={entries} onClose={() => setActiveNutrient(null)} />
+      )}
+    </div>
+  );
+}
+
+function PlateDateControl({ dateKey, todayKey, setDateKey }) {
+  return (
+    <div className="plate-date-control">
+      <button aria-label="Previous day" onClick={() => setDateKey(shiftLocalDateKey(dateKey, -1))}><ChevronLeft size={20} /></button>
+      <div><CalendarDays size={17} /><strong>{formatPlateDate(dateKey)}</strong><span>{dateFromLocalKey(dateKey).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</span></div>
+      <button aria-label="Next day" disabled={dateKey >= todayKey} onClick={() => setDateKey(shiftLocalDateKey(dateKey, 1))}><ChevronRight size={20} /></button>
+    </div>
+  );
+}
+
+function GoalSetupCard({ initialGoals, onSave, onCancel }) {
+  const [values, setValues] = useState(() => Object.fromEntries(PLATE_NUTRIENTS.map((nutrient) => [nutrient, String(initialGoals[nutrient])] )));
+  const [error, setError] = useState("");
+  const maximums = { calories: 10000, protein: 1000, carbs: 1500, fat: 500, fiber: 250, sugar: 500, sodium: 20000 };
+
+  function submit(event) {
+    event.preventDefault();
+    const goals = Object.fromEntries(PLATE_NUTRIENTS.map((nutrient) => [nutrient, toNumber(values[nutrient])]));
+    const invalid = PLATE_NUTRIENTS.find((nutrient) => !hasNumber(goals[nutrient]) || goals[nutrient] <= 0 || goals[nutrient] > maximums[nutrient]);
+    if (invalid) {
+      setError(`Enter a valid ${PLATE_NUTRIENT_META[invalid].label.toLowerCase()} target.`);
+      return;
+    }
+    setError("");
+    onSave(goals);
+  }
+
+  return (
+    <form className="card plate-goal-card" onSubmit={submit}>
+      <div className="plate-goal-note">Starter values are editable defaults, not personalized medical recommendations.</div>
+      <div className="plate-goal-grid">
+        {PLATE_NUTRIENTS.map((nutrient) => {
+          const meta = PLATE_NUTRIENT_META[nutrient];
+          return (
+            <label key={nutrient}>
+              <span><i className={`nutrient-dot nutrient-${meta.tone}`} />{meta.label}</span>
+              <span className="plate-goal-input"><input type="number" inputMode="decimal" min="0.1" max={maximums[nutrient]} step="any" value={values[nutrient]} onChange={(event) => setValues((current) => ({ ...current, [nutrient]: event.target.value }))} required /><em>{meta.unit}</em></span>
+            </label>
+          );
+        })}
+      </div>
+      {error && <p className="plate-form-error" role="alert">{error}</p>}
+      <div className="plate-goal-actions">
+        {onCancel && <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>}
+        <button type="submit" className="primary-button"><Check size={18} />Save goals</button>
+      </div>
+    </form>
+  );
+}
+
+function CalorieProgress({ total, goal, onOpen }) {
+  const consumed = total.total;
+  const progress = goal > 0 ? clamp((consumed / goal) * 100, 0, 100) : 0;
+  const remaining = goal - consumed;
+  return (
+    <button className="card plate-calorie-card" onClick={onOpen} aria-label="View calorie contributions">
+      <div className="plate-calorie-ring" style={{ "--progress": `${progress * 3.6}deg` }} role="img" aria-label={`${formatNutrientValue(consumed, "calories")} of ${formatNutrientValue(goal, "calories")} kilocalories`}>
+        <div><strong>{formatNutrientValue(consumed, "calories")}</strong><span>of {formatNutrientValue(goal, "calories")} kcal</span></div>
+      </div>
+      <div className="plate-calorie-copy">
+        <span>Calories</span>
+        <strong>{remaining >= 0 ? `${formatNutrientValue(remaining, "calories")} kcal remaining` : `${formatNutrientValue(Math.abs(remaining), "calories")} kcal over goal`}</strong>
+        {total.missingCount > 0 && <small>Partial total · {total.missingCount} {total.missingCount === 1 ? "food is" : "foods are"} missing calorie data</small>}
+      </div>
+    </button>
+  );
+}
+
+function NutrientProgress({ nutrient, total, goal, onOpen }) {
+  const meta = PLATE_NUTRIENT_META[nutrient];
+  const progress = goal > 0 ? clamp((total.total / goal) * 100, 0, 100) : 0;
+  const remaining = Math.max(0, goal - total.total);
+  const over = Math.max(0, total.total - goal);
+  const progressCopy = over > 0 ? `${formatNutrientValue(over, nutrient)} ${meta.unit} over ${meta.goalWord}` : `${formatNutrientValue(remaining, nutrient)} ${meta.unit} remaining`;
+  return (
+    <button className="plate-progress-row" onClick={onOpen} aria-label={`View ${meta.label} contributions`}>
+      <span className="plate-progress-copy"><strong>{meta.label}</strong><small>{formatNutrientValue(total.total, nutrient)} {meta.unit} of {formatNutrientValue(goal, nutrient)} {meta.unit} {meta.goalWord}</small></span>
+      <span className="plate-progress-track" aria-hidden="true"><i className={`nutrient-${meta.tone}`} style={{ width: `${progress}%` }} /></span>
+      <span className="plate-progress-meta"><small>{progressCopy}</small>{total.missingCount > 0 && <em>Partial total</em>}</span>
+      <ChevronRight size={17} />
+    </button>
+  );
+}
+
+function DailyFoodRow({ entry, onClick }) {
+  return (
+    <button className="plate-food-row" onClick={onClick}>
+      <ProductImage product={entry.product} alt={entry.product.name} />
+      <span><strong>{entry.product.name}</strong><small>{formatPlateServing(entry)}</small></span>
+      <span className="plate-food-calories">{hasNumber(entry.contribution.calories) ? `${formatNutrientValue(entry.contribution.calories, "calories")} kcal` : "Calories missing"}</span>
+      <ChevronRight size={17} />
+    </button>
+  );
+}
+
+function formatPlateServing(entry) {
+  if (entry.mode === "grams") return `${formatNutrientValue(entry.amount, "protein")} g`;
+  if (entry.mode === "milliliters") return `${formatNutrientValue(entry.amount, "protein")} ml`;
+  return `${formatNutrientValue(entry.amount, "protein")} ${entry.amount === 1 ? "serving" : "servings"}${entry.nutritionBase?.servingSize && !/^1 serving$/i.test(entry.nutritionBase.servingSize) ? ` · ${entry.nutritionBase.servingSize}` : ""}`;
+}
+
+function NutrientDetailSheet({ nutrient, total, goal, entries, onClose }) {
+  const meta = PLATE_NUTRIENT_META[nutrient];
+  const contributors = entries.filter((entry) => hasNumber(entry.contribution?.[nutrient]));
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <section className="ingredient-sheet plate-detail-sheet" role="dialog" aria-modal="true" aria-label={`${meta.label} contributions`} onClick={(event) => event.stopPropagation()}>
+        <div className="sheet-handle" />
+        <div className="sheet-header"><div><span className="eyebrow">Today’s Plate</span><h2 className="nutrient-sheet-title"><i className={`nutrient-dot nutrient-${meta.tone}`} />{meta.label}</h2></div><button onClick={onClose} aria-label="Close"><X size={20} /></button></div>
+        <div className="plate-detail-total"><strong>{formatNutrientValue(total.total, nutrient)} {meta.unit}</strong><span>of {formatNutrientValue(goal, nutrient)} {meta.unit} {meta.goalWord}</span></div>
+        <div className="plate-contributor-list">
+          {contributors.map((entry) => <div key={entry.id}><span>{entry.product.name}</span><strong>{formatNutrientValue(entry.contribution[nutrient], nutrient)} {meta.unit}</strong></div>)}
+        </div>
+        {total.missingCount > 0 && <p className="plate-partial-note">{total.missingCount === 1 ? "One logged food does" : `${total.missingCount} logged foods do`} not include {meta.label.toLowerCase()} information.</p>}
+      </section>
     </div>
   );
 }
@@ -5715,8 +6220,9 @@ function HistoryGroup({ title, items, productIndex, onOpenProduct }) {
   );
 }
 
-function ProfileScreen({ dailyTotals, dailyLog }) {
-  const remaining = 2200 - dailyTotals.calories;
+function ProfileScreen({ dailyTotals, dailyLog, goals }) {
+  const calorieGoal = goals?.calories;
+  const remaining = hasNumber(calorieGoal) ? calorieGoal - dailyTotals.calories : null;
   return (
     <div className="stack">
       <Header eyebrow="Profile" title="Profile" />
@@ -5731,7 +6237,7 @@ function ProfileScreen({ dailyTotals, dailyLog }) {
           </div>
         </div>
         <div className="settings-list">
-          <ProfileRow icon={Target} label="Daily calorie goal" value="2,200 calories" />
+          <ProfileRow icon={Target} label="Daily calorie goal" value={hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Set in Today’s Plate"} />
           <ProfileRow icon={Bell} label="Saved preferences" value="Low sodium, fragrance-free" />
           <ProfileRow icon={AlertTriangle} label="Allergies or sensitivities" value="Milk, peanuts, fragrance" />
           <ProfileRow icon={Minus} label="Avoided ingredients" value="Red 40, artificial flavor" />
@@ -5742,35 +6248,35 @@ function ProfileScreen({ dailyTotals, dailyLog }) {
         <div className="section-heading">
           <div>
             <span className="eyebrow">Food only</span>
-            <h2>Daily Log</h2>
+            <h2>Today’s Plate</h2>
           </div>
           <Dumbbell size={21} />
         </div>
         <div className="daily-log profile-log">
           <div className="daily-ring">
             <Target size={24} />
-            <strong>{remaining.toLocaleString()}</strong>
-            <span>left</span>
+            <strong>{hasNumber(remaining) ? Math.abs(Math.round(remaining)).toLocaleString() : "—"}</strong>
+            <span>{hasNumber(remaining) ? (remaining >= 0 ? "left" : "over") : "set goals"}</span>
           </div>
           <div className="daily-copy">
             <div className="calorie-line">
               <span>Goal</span>
-              <strong>2,200 calories</strong>
+              <strong>{hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Not set"}</strong>
             </div>
             <div className="calorie-line">
               <span>Eaten</span>
-              <strong>{dailyTotals.calories.toLocaleString()}</strong>
+              <strong>{Math.round(dailyTotals.calories).toLocaleString()} kcal</strong>
             </div>
             <small>
-              Protein {dailyTotals.protein}g/140g | Carbs {dailyTotals.carbs}g | Fat {dailyTotals.fat}g
+              Protein {formatNutrientValue(dailyTotals.protein, "protein")}g · Carbs {formatNutrientValue(dailyTotals.carbs, "carbs")}g · Fat {formatNutrientValue(dailyTotals.fat, "fat")}g
             </small>
           </div>
         </div>
         <div className="today-foods">
           {dailyLog.slice(0, 4).map((food) => (
             <div key={food.id}>
-              <span>{food.name}</span>
-              <strong>{food.calories} calories</strong>
+              <span>{food.product.name}</span>
+              <strong>{formatNutrientValue(food.contribution.calories, "calories")} kcal</strong>
             </div>
           ))}
         </div>
@@ -5825,6 +6331,97 @@ function EmptyState({ title, copy, compact = false }) {
       <Search size={compact ? 18 : 22} />
       <strong>{title}</strong>
       <span>{copy}</span>
+    </div>
+  );
+}
+
+function ServingSheet({ product, onClose, onAdd }) {
+  const profile = getNutritionLogProfile(product);
+  const [amount, setAmount] = useState(profile?.amount || 1);
+  if (!profile) return null;
+  const contribution = normalizeNutritionForServing(product, amount, profile.mode);
+  const isValid = Boolean(contribution) && toNumber(amount) > 0;
+  const missingCount = PLATE_NUTRIENTS.filter((nutrient) => !hasNumber(contribution?.[nutrient])).length;
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <section className="ingredient-sheet serving-sheet" role="dialog" aria-modal="true" aria-label={`Add ${product.name} to Today’s Plate`} onClick={(event) => event.stopPropagation()}>
+        <div className="sheet-handle" />
+        <div className="sheet-header">
+          <div><span className="eyebrow">Today’s Plate</span><h2>Add a serving</h2></div>
+          <button onClick={onClose} aria-label="Close serving sheet"><X size={20} /></button>
+        </div>
+        <div className="serving-product">
+          <ProductImage product={product} alt={product.name} />
+          <div><strong>{product.name}</strong><span>{product.brand}</span><small>{profile.label}</small></div>
+        </div>
+        <QuantityControl mode={profile.mode} amount={amount} setAmount={setAmount} step={profile.step} />
+        <div className="serving-preview-heading"><strong>Adds to today</strong><span>Based on this amount</span></div>
+        {contribution && <NutritionContributionList contribution={contribution} />}
+        {missingCount > 0 && <p className="plate-partial-note">Some nutrition fields are missing from this product.</p>}
+        <button className="primary-button full" disabled={!isValid} onClick={() => onAdd(product, Number(amount), profile.mode)}><Plus size={18} />Add to Today’s Plate</button>
+      </section>
+    </div>
+  );
+}
+
+function QuantityControl({ mode, amount, setAmount, step, disabled = false }) {
+  const numeric = toNumber(amount) || 0;
+  const minimum = mode === "servings" ? 0.5 : 1;
+  const label = mode === "servings" ? "Quantity" : mode === "grams" ? "Grams" : "Milliliters";
+  const unit = mode === "servings" ? "servings" : mode === "grams" ? "g" : "ml";
+  return (
+    <div className="quantity-control-wrap">
+      <span>{label}</span>
+      <div className="quantity-control">
+        <button type="button" aria-label={`Decrease ${label.toLowerCase()}`} disabled={disabled || numeric <= minimum} onClick={() => setAmount(Math.max(minimum, roundNutrient(numeric - step, 1)))}><Minus size={18} /></button>
+        <label><input type="number" inputMode="decimal" min={minimum} step={step} value={amount} disabled={disabled} onChange={(event) => setAmount(event.target.value)} aria-label={label} /><span>{unit}</span></label>
+        <button type="button" aria-label={`Increase ${label.toLowerCase()}`} disabled={disabled} onClick={() => setAmount(roundNutrient(Math.max(minimum, numeric) + step, 1))}><Plus size={18} /></button>
+      </div>
+    </div>
+  );
+}
+
+function NutritionContributionList({ contribution }) {
+  return (
+    <div className="nutrition-contribution-list">
+      {PLATE_NUTRIENTS.filter((nutrient) => hasNumber(contribution[nutrient])).map((nutrient) => {
+        const meta = PLATE_NUTRIENT_META[nutrient];
+        return <div key={nutrient}><span><i className={`nutrient-dot nutrient-${meta.tone}`} />{meta.label}</span><strong>{formatNutrientValue(contribution[nutrient], nutrient)} {meta.unit}</strong></div>;
+      })}
+    </div>
+  );
+}
+
+function FoodContributionSheet({ target, plateState, onClose, onUpdate, onRemove }) {
+  const day = plateState.days[target.dateKey];
+  const entry = day?.entries.find((item) => item.id === target.entryId);
+  const [amount, setAmount] = useState(entry?.amount || 1);
+  if (!entry) return null;
+  const isToday = target.dateKey === getLocalDateKey();
+  const product = { ...entry.product, nutrition: entry.nutritionBase };
+  const contribution = normalizeNutritionForServing(product, amount, entry.mode) || entry.contribution;
+  const step = entry.mode === "servings" ? 0.5 : 10;
+  const isValid = toNumber(amount) > 0;
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <section className="ingredient-sheet serving-sheet contribution-sheet" role="dialog" aria-modal="true" aria-label={`${entry.product.name} contribution`} onClick={(event) => event.stopPropagation()}>
+        <div className="sheet-handle" />
+        <div className="sheet-header">
+          <div><span className="eyebrow">{formatPlateDate(target.dateKey)}</span><h2>Food contribution</h2></div>
+          <button onClick={onClose} aria-label="Close food contribution"><X size={20} /></button>
+        </div>
+        <div className="serving-product"><ProductImage product={entry.product} alt={entry.product.name} /><div><strong>{entry.product.name}</strong><span>{entry.product.brand}</span><small>{formatPlateServing(entry)}</small></div></div>
+        <QuantityControl mode={entry.mode} amount={amount} setAmount={setAmount} step={step} disabled={!isToday} />
+        <NutritionContributionList contribution={contribution} />
+        {isToday ? (
+          <div className="contribution-actions">
+            <button className="primary-button" disabled={!isValid} onClick={() => { onUpdate(target.dateKey, entry.id, Number(amount)); onClose(); }}><Check size={18} />Save changes</button>
+            <button className="remove-plate-entry" onClick={() => onRemove(target.dateKey, entry.id)}><Trash2 size={17} />Remove from Today’s Plate</button>
+          </div>
+        ) : (
+          <p className="plate-readonly-note">Previous days are read-only.</p>
+        )}
+      </section>
     </div>
   );
 }
@@ -6012,7 +6609,24 @@ function InfoBlock({ label, value }) {
   );
 }
 
-const rootElement = document.getElementById("root");
-const root = globalThis.__ziyaReactRoot || createRoot(rootElement);
-globalThis.__ziyaReactRoot = root;
-root.render(<App />);
+export {
+  calculateDailyTotals,
+  createPlateEntry,
+  getLocalDateKey,
+  getNutritionLogProfile,
+  loadPlateState,
+  lookupProductByBarcode,
+  mapOpenFoodFactsNutrition,
+  normalizeNutritionForServing,
+  sanitizePlateGoals,
+  shiftLocalDateKey,
+  updatePlateEntryInState,
+  removePlateEntryFromState
+};
+
+if (typeof document !== "undefined") {
+  const rootElement = document.getElementById("root");
+  const root = globalThis.__ziyaReactRoot || createRoot(rootElement);
+  globalThis.__ziyaReactRoot = root;
+  root.render(<App />);
+}
