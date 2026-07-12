@@ -2464,6 +2464,55 @@ button {
   isolation: isolate;
 }
 
+.knowledge-status {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.knowledge-citations {
+  padding: 14px 0;
+  border-bottom: 1px solid #edf1ed;
+}
+
+.knowledge-citations > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.knowledge-citations a {
+  display: block;
+  padding: 9px 0;
+  color: #29483a;
+  text-decoration: none;
+}
+
+.knowledge-citations a + a {
+  border-top: 1px solid #edf1ed;
+}
+
+.knowledge-citations strong,
+.knowledge-citations small {
+  display: block;
+}
+
+.knowledge-citations strong {
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.knowledge-citations small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
 .report-reasons {
   padding: 0;
   overflow: hidden;

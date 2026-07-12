@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  enrichIngredientKnowledge,
+  normalizeIngredientLabel,
+  normalizeProductTextForAnalysis,
+  resolveLocalIngredientKnowledge
+} from "./knowledge/ingredientKnowledge";
+import {
   AlertTriangle,
   Apple,
   Baby,
@@ -42,8 +48,8 @@ import {
 import "./styles.css";
 
 const riskMeta = {
-  safe: { label: "Safe", className: "risk-safe" },
-  moderate: { label: "Moderate", className: "risk-moderate" },
+  safe: { label: "Low concern", className: "risk-safe" },
+  moderate: { label: "Moderate concern", className: "risk-moderate" },
   harmful: { label: "Higher concern", className: "risk-harmful" },
   unknown: { label: "Needs review", className: "risk-unknown" }
 };
@@ -145,171 +151,6 @@ function escapeSvg(value) {
     .replace(/>/g, "&gt;")
     .slice(0, 28);
 }
-
-const ingredientDetails = {
-  "Palm oil": {
-    risk: "moderate",
-    type: "Refined plant oil",
-    why:
-      "Flagged as moderate because it can raise saturated fat in some foods and may be associated with higher processing levels depending on the product.",
-    common: "Microwave popcorn, baked snacks, spreads, frozen meals",
-    alternatives: "Look for olive oil, avocado oil, sunflower oil, or products with less saturated fat.",
-    sources: ["Food label reference", "Nutrition reference", "Chemical reference"]
-  },
-  "Artificial flavor": {
-    risk: "harmful",
-    type: "Flavor additive",
-    why:
-      "Flagged as higher concern because it is a broad label term and can indicate a more processed formula. Sensitivity depends on product type and frequency of use.",
-    common: "Snack foods, candy, drinks, cereals, protein bars",
-    alternatives: "Choose products flavored with named spices, cocoa, vanilla, fruit, or no added flavor.",
-    sources: ["Food additive reference", "Food label reference"]
-  },
-  "Salt": {
-    risk: "safe",
-    type: "Mineral seasoning",
-    why:
-      "Low concern for typical use, but total sodium can matter for the whole product and daily intake.",
-    common: "Snacks, sauces, frozen meals, soups",
-    alternatives: "Choose lower-sodium products when sodium is already high in the product.",
-    sources: ["Nutrition reference", "Food label reference"]
-  },
-  "Annatto color": {
-    risk: "moderate",
-    type: "Color additive",
-    why:
-      "Usually lower concern than synthetic dyes, but flagged as moderate because color additives can be sensitivity triggers for some people.",
-    common: "Cheese snacks, popcorn, cereals, dairy products",
-    alternatives: "Look for products with no added color or naturally colored ingredients only.",
-    sources: ["Color additive reference", "Chemical reference"]
-  },
-  "Red 40": {
-    risk: "harmful",
-    type: "Artificial food dye",
-    why:
-      "Red 40 is a synthetic color additive. Some research and regulatory discussions have examined possible sensitivity and behavioral concerns, especially in children.",
-    common: "Candy, drinks, cereals, snacks",
-    alternatives: "Look for beet juice, turmeric, paprika extract, or no added color.",
-    sources: ["Color additive reference", "Food safety review", "Chemical reference"]
-  },
-  "Fragrance": {
-    risk: "moderate",
-    type: "Fragrance blend",
-    why:
-      "Fragrance can include many aroma compounds and may be irritating for some users, especially with sensitive skin or frequent exposure.",
-    common: "Shampoo, lotion, deodorant, cleaners, laundry detergent",
-    alternatives: "Choose fragrance-free products or products with clearly disclosed scent ingredients.",
-    sources: ["Cosmetic ingredient reference", "Chemical reference", "Safer product reference"]
-  },
-  "Methylisothiazolinone": {
-    risk: "harmful",
-    type: "Preservative",
-    why:
-      "Flagged as higher concern because it is a known skin sensitizer for some people and is more concerning in leave-on or high-exposure products.",
-    common: "Shampoo, cleaners, wipes, detergents",
-    alternatives: "Look for products with lower-sensitizing preservative systems and clear allergen labeling.",
-    sources: ["Cosmetic ingredient reference", "Chemical reference", "Ingredient safety record"]
-  },
-  "Sodium laureth sulfate": {
-    risk: "moderate",
-    type: "Surfactant",
-    why:
-      "A common cleansing agent that can be drying or irritating for some users depending on concentration and product format.",
-    common: "Shampoo, body wash, toothpaste, dish soap",
-    alternatives: "Look for gentler surfactants such as sodium cocoyl isethionate or coco-glucoside.",
-    sources: ["Cosmetic ingredient reference", "Chemical reference"]
-  },
-  "Sodium hypochlorite": {
-    risk: "harmful",
-    type: "Bleach cleaner",
-    why:
-      "Flagged as higher concern because it can irritate skin, eyes, and airways and should not be mixed with ammonia or acids.",
-    common: "Disinfectants, bleach cleaners, wipes",
-    alternatives: "Use milder cleaners when disinfection is not required and always follow the label.",
-    sources: ["Product safety reference", "Chemical reference"]
-  },
-  "Cocamidopropyl betaine": {
-    risk: "moderate",
-    type: "Surfactant",
-    why:
-      "Generally useful as a foaming cleanser, but it may bother some users with sensitivities.",
-    common: "Shampoo, soap, face wash, dish soap",
-    alternatives: "Look for low-irritation, fragrance-free formulas if sensitivity is a concern.",
-    sources: ["Cosmetic ingredient reference", "Chemical reference"]
-  },
-  "Ibuprofen": {
-    risk: "moderate",
-    type: "Active drug ingredient",
-    why:
-      "This is an active medicine ingredient, so it is not scored as good or bad. Follow the dosage label and ask a doctor or pharmacist if unsure.",
-    common: "Pain relievers, fever reducers",
-    alternatives: "Ask a doctor or pharmacist which option fits your situation.",
-    sources: ["Medicine label reference", "Drug safety reference"]
-  },
-  "Cotton": {
-    risk: "safe",
-    type: "Natural fiber",
-    why:
-      "Low concern for most users. New textiles can still carry finishing residues, so washing before first wear is a good default.",
-    common: "T-shirts, towels, bedding, baby clothing",
-    alternatives: "Look for organic cotton, undyed cotton, or OEKO-TEX certified fabrics for lower-residue preferences.",
-    sources: ["Textile certification reference", "Material reference"]
-  },
-  "Organic cotton": {
-    risk: "safe",
-    type: "Certified natural fiber",
-    why:
-      "Generally lower concern when certification is clear. Still review dyes, finishes, and care labels.",
-    common: "Towels, shirts, underwear, bedding",
-    alternatives: "Choose certified organic cotton, undyed textiles, or fragrance-free/dye-free materials.",
-    sources: ["Textile certification reference", "Material reference"]
-  },
-  "Polyester": {
-    risk: "moderate",
-    type: "Synthetic fiber",
-    why:
-      "Flagged as moderate because it is synthetic, can retain odor, and may bother some sensitive-skin users depending on weave, dyes, and finishes.",
-    common: "Athletic shirts, fleece, towels, scrubbers, blends",
-    alternatives: "Look for cotton, organic cotton, lyocell, or certified low-residue textiles.",
-    sources: ["Material reference", "Chemical reference"]
-  },
-  "Nylon": {
-    risk: "moderate",
-    type: "Synthetic fiber",
-    why:
-      "A durable synthetic fiber that may be less comfortable for some sensitive users depending on dyes, finishes, and skin contact.",
-    common: "Activewear, scrubbers, bags, hosiery",
-    alternatives: "Choose cotton, organic cotton, or low-dye certified fabric when skin sensitivity is a concern.",
-    sources: ["Material reference", "Chemical reference"]
-  },
-  "Spandex": {
-    risk: "moderate",
-    type: "Elastic synthetic fiber",
-    why:
-      "Often used in small amounts for stretch. It can affect breathability and may matter for very sensitive users in tight clothing.",
-    common: "Stretch shirts, leggings, underwear, athletic wear",
-    alternatives: "Look for looser fits, lower-spandex blends, or soft natural-fiber basics.",
-    sources: ["Material reference"]
-  }
-};
-
-const sourceLinks = {
-  "Food label reference": "https://world.openfoodfacts.org/",
-  "Nutrition reference": "https://fdc.nal.usda.gov/",
-  "Food additive reference": "https://www.fda.gov/food/food-additives-petitions/food-additive-status-list",
-  "Color additive reference": "https://www.fda.gov/industry/color-additives",
-  "Food safety review": "https://www.efsa.europa.eu/",
-  "Cosmetic ingredient reference": "https://world.openbeautyfacts.org/",
-  "Safer product reference": "https://www.epa.gov/saferchoice",
-  "Product safety reference": "https://www.epa.gov/pesticide-labels",
-  "Ingredient safety record": "https://echa.europa.eu/",
-  "Medicine label reference": "https://dailymed.nlm.nih.gov/dailymed/",
-  "Drug safety reference": "https://open.fda.gov/",
-  "Chemical reference": "https://pubchem.ncbi.nlm.nih.gov/",
-  "Ingredient reference": "https://pubchem.ncbi.nlm.nih.gov/",
-  "Textile certification reference": "https://www.oeko-tex.com/",
-  "Material reference": "https://textileexchange.org/"
-};
 
 const confidenceMeta = {
   Verified: {
@@ -1210,19 +1051,25 @@ async function lookupDemoProductByBarcode(barcode, catalog) {
 }
 
 function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
-  const name = cleanText(rawProduct.product_name || rawProduct.product_name_en || rawProduct.generic_name) || `Food product ${barcode}`;
+  const originalName = cleanText(rawProduct.product_name || rawProduct.product_name_en || rawProduct.generic_name) || `Food product ${barcode}`;
+  const normalizedName = normalizeProductTextForAnalysis(originalName);
+  const name = normalizedName.translated && normalizedName.translationConfidence === "high" ? normalizedName.englishText : originalName;
   const brand = cleanText(String(rawProduct.brands || "").split(",")[0]) || "Unknown brand";
   const image = pickOpenFoodFactsImage(rawProduct);
   const ingredients = mapOpenFoodFactsIngredients(rawProduct);
   const nutrition = mapOpenFoodFactsNutrition(rawProduct);
   const categoryPath = cleanText(rawProduct.categories || asArray(rawProduct.categories_tags).join(" "));
-  const inferredCategory = inferCategoryFromProductText([name, brand, categoryPath, ingredients.slice(0, 6).map((item) => item.name).join(" ")].join(" "));
+  const normalizedCategoryPath = normalizeProductTextForAnalysis(categoryPath).englishText;
+  const inferredCategory = inferCategoryFromProductText([normalizedName.englishText, brand, normalizedCategoryPath, ingredients.slice(0, 6).map((item) => item.name).join(" ")].join(" "));
   const hasFoodEvidence = inferredCategory === "food" || ingredients.length > 0 || hasCoreFoodNutrition(nutrition);
   if (!["food", "unknown"].includes(inferredCategory) || (inferredCategory === "unknown" && !hasFoodEvidence)) {
     return createPartialIdentityProduct({
       id: `food-${barcode}`,
       barcode,
       name,
+      originalName: name !== originalName ? originalName : undefined,
+      analysisName: normalizedName.englishText,
+      translationConfidence: normalizedName.translationConfidence,
       brand,
       category: inferredCategory === "unknown" ? "unknown" : inferredCategory,
       image,
@@ -1244,6 +1091,7 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
   const analysisReady = hasIngredients && hasNutrition;
   const concerns = [
     ...(hasAdditives ? ["Additives listed"] : []),
+    ...(counts.unknown > 0 ? [`${counts.unknown} ${counts.unknown === 1 ? "ingredient needs" : "ingredients need"} review`] : []),
     ...nutritionFlags.concerns,
     ...(processing === "Ultra-processed" ? ["Ultra-processed"] : []),
     ...ingredients
@@ -1256,12 +1104,15 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
     ...(hasNumber(nutrition.protein) && nutrition.protein >= 10 ? ["Good protein"] : []),
     ...(hasNumber(nutrition.fiber) && nutrition.fiber >= 3 ? ["Some fiber"] : []),
     ...(ingredients.length > 0 && ingredients.length <= 6 ? ["Short ingredient list"] : []),
-    ...(concerns.length ? [] : ["No major flags found"])
+    ...(concerns.length || counts.unknown > 0 ? [] : ["No major flags found"])
   ].slice(0, 4);
   const baseProduct = {
     id: `food-${barcode}`,
     barcode,
     name,
+    originalName: name !== originalName ? originalName : undefined,
+    analysisName: normalizedName.englishText,
+    translationConfidence: normalizedName.translationConfidence,
     brand,
     category: "food",
     image,
@@ -1400,10 +1251,7 @@ function mapOpenFoodFactsIngredients(product) {
     .map((item) => cleanText(item.replace(/\([^)]*\)/g, "")))
     .filter(Boolean);
   const names = Array.from(new Set((fromArray.length ? fromArray : fromText).slice(0, 32)));
-  return names.map((name) => {
-    const risk = classifyIngredientRisk(name);
-    return { name, risk, type: selectedTypeForIngredient(name, risk) };
-  });
+  return names.map((name) => createIngredientRecordFromLabel(name, "food"));
 }
 
 function mapOpenFoodFactsNutrition(product) {
@@ -1728,10 +1576,11 @@ function getRecommendationReason(product, role) {
 function getRiskCounts(ingredients = []) {
   return ingredients.reduce(
     (acc, ingredient) => {
-      acc[ingredient.risk] += 1;
+      const risk = ["safe", "moderate", "harmful", "unknown"].includes(ingredient.risk) ? ingredient.risk : "unknown";
+      acc[risk] += 1;
       return acc;
     },
-    { safe: 0, moderate: 0, harmful: 0 }
+    { safe: 0, moderate: 0, harmful: 0, unknown: 0 }
   );
 }
 
@@ -1770,37 +1619,18 @@ function scoreFoodProduct(input) {
   };
 }
 
-function classifyIngredientRisk(name) {
-  const lower = name.toLowerCase();
-  if (
-    lower.includes("red 40") ||
-    lower.includes("artificial") ||
-    lower.includes("methylisothiazolinone") ||
-    lower.includes("hypochlorite") ||
-    lower.includes("titanium dioxide") ||
-    lower.includes("bha") ||
-    lower.includes("bht")
-  ) {
-    return "harmful";
-  }
-  if (
-    lower.includes("fragrance") ||
-    lower.includes("flavor") ||
-    lower.includes("flavour") ||
-    lower.includes("sulfate") ||
-    lower.includes("sulphate") ||
-    lower.includes("palm") ||
-    lower.includes("preservative") ||
-    lower.includes("color") ||
-    lower.includes("colour") ||
-    lower.includes("carrageenan") ||
-    lower.includes("polyester") ||
-    lower.includes("nylon") ||
-    lower.includes("spandex")
-  ) {
-    return "moderate";
-  }
-  return "safe";
+function createIngredientRecordFromLabel(label, category) {
+  const knowledge = resolveLocalIngredientKnowledge(label, { category });
+  return {
+    name: knowledge.canonicalName,
+    originalLabelText: knowledge.originalLabelText && knowledge.originalLabelText !== knowledge.canonicalName ? knowledge.originalLabelText : undefined,
+    risk: knowledge.risk,
+    type: knowledge.type,
+    knowledgeId: knowledge.id,
+    knowledgeConfidence: knowledge.confidence,
+    translated: knowledge.translated,
+    translationConfidence: knowledge.translationConfidence
+  };
 }
 
 function scoreBeautyProduct(input) {
@@ -1838,10 +1668,8 @@ function createManualReport({
     .split(/[,;\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
-  const ingredients = normalized.map((name) => {
-    const risk = classifyIngredientRisk(name);
-    return { name, risk, type: selectedTypeForIngredient(name, risk) };
-  });
+  const knowledgeCategory = category === "not-sure" ? undefined : category;
+  const ingredients = normalized.map((name) => createIngredientRecordFromLabel(name, knowledgeCategory));
 
   const selectedCategory = category === "not-sure" ? inferCategory(ingredients) : category;
   const hasNutrition = selectedCategory === "food" && hasCoreFoodNutrition(nutrition);
@@ -1897,14 +1725,15 @@ function createManualReport({
       ...ingredient,
       percent: ingredient.name.toLowerCase().includes("spandex") ? 8 : ingredients.length === 1 ? 100 : Math.floor(100 / ingredients.length)
     }));
-    const hasSynthetic = materials.some((material) => material.risk !== "safe");
+    const hasSynthetic = materials.some((material) => ["moderate", "harmful"].includes(material.risk));
+    const hasUnknownMaterial = materials.some((material) => material.risk === "unknown");
     return {
       ...baseProduct,
       image: undefined,
       rating: "Material Summary",
-      summaryStatus: hasSynthetic ? "Moderate Concern" : "Low Concern",
+      summaryStatus: hasUnknownMaterial ? "Needs review" : hasSynthetic ? "Moderate Concern" : "Low Concern",
       materialSummary: materials.map((material) => material.name).join(", "),
-      concernLevel: hasSynthetic ? "Moderate" : "Low",
+      concernLevel: hasUnknownMaterial ? "Unknown" : hasSynthetic ? "Moderate" : "Low",
       treatmentNotes: "Treatment and certification details were not found in the pasted or reviewed label text.",
       sensitiveSkinNotes: "Wash before first use and review dyes, finishes, and skin-contact notes.",
       washBeforeUse: true,
@@ -1985,24 +1814,19 @@ function mergeProductLabelCompletion(product, completed) {
   };
 }
 
-function selectedTypeForIngredient(name, risk) {
-  const lower = name.toLowerCase();
-  if (lower.includes("cotton")) return "Natural fiber";
-  if (lower.includes("polyester") || lower.includes("nylon") || lower.includes("spandex")) return "Synthetic fiber";
-  return risk === "safe" ? "Ingredient" : "Flagged ingredient";
-}
-
 function inferCategory(ingredients) {
   return inferCategoryFromProductText(ingredients.map((ingredient) => ingredient.name).join(" "));
 }
 
 function buildManualConcerns(ingredients, category) {
   const counts = getRiskCounts(ingredients);
-  if (category === "unknown") return ["Category not confirmed", `${counts.moderate + counts.harmful} flagged ingredients`, "Add the product label"];
+  const reviewCount = counts.moderate + counts.harmful;
+  const knowledgeNote = counts.unknown ? `${counts.unknown} ${counts.unknown === 1 ? "ingredient needs" : "ingredients need"} source review` : `${reviewCount} flagged ingredients`;
+  if (category === "unknown") return ["Category not confirmed", knowledgeNote, "Add the product label"];
   if (category === "medicine") return ["Review active ingredient", "Check duplicate ingredients", "Follow dosage label"];
-  if (category === "textile") return ["Material blend", `${counts.moderate + counts.harmful} material notes`, "Wash before use"];
-  if (category === "household") return ["Chemical caution", `${counts.moderate + counts.harmful} flagged ingredients`, "Review warning label"];
-  if (category === "beauty") return ["Possible irritants", `${counts.moderate + counts.harmful} flagged ingredients`, "Sensitivity depends on user"];
+  if (category === "textile") return ["Material blend", counts.unknown ? knowledgeNote : `${reviewCount} material notes`, "Wash before use"];
+  if (category === "household") return ["Chemical caution", knowledgeNote, "Review warning label"];
+  if (category === "beauty") return ["Possible irritants", knowledgeNote, "Sensitivity depends on user"];
   return ["Ingredient flags", "Nutrition not available from paste", "Processing estimated"];
 }
 
@@ -5162,7 +4986,7 @@ function ReportScreen({
   const allergens = getAllergenGroups(product.allergens);
   const nutritionCount = getAvailableNutritionRows(product.nutrition).length;
   const ingredientSubtitle = ingredients.length
-    ? `${ingredients.length} ingredients · ${counts.moderate + counts.harmful} flagged`
+    ? `${ingredients.length} ingredients · ${counts.moderate + counts.harmful} flagged${counts.unknown ? ` · ${counts.unknown} need review` : ""}`
     : "Needs label";
 
   return (
@@ -5241,7 +5065,7 @@ function ReportScreen({
             setExpandedSection={setExpandedSection}
           >
             {ingredients.length ? (
-              <IngredientRows ingredients={ingredients} onIngredientClick={onIngredientClick} />
+              <IngredientRows ingredients={ingredients} category={product.category} onIngredientClick={onIngredientClick} />
             ) : (
               <MissingReportData copy={isTextile ? "Add the material tag to complete this summary." : "Add the ingredient label to complete this report."} />
             )}
@@ -5273,7 +5097,7 @@ function ReportScreen({
                 setExpandedSection={setExpandedSection}
               >
                 {additives.length ? (
-                  <IngredientRows ingredients={additives} onIngredientClick={onIngredientClick} additive />
+                  <IngredientRows ingredients={additives} category={product.category} onIngredientClick={onIngredientClick} additive />
                 ) : (
                   <MissingReportData copy={product.fieldConfidence?.additives === "Missing" ? "Add the ingredient label to review additives." : "No additives are listed in the available product data."} />
                 )}
@@ -5387,7 +5211,7 @@ function MissingReportData({ copy }) {
   return <p className="report-missing">{copy}</p>;
 }
 
-function IngredientRows({ ingredients, onIngredientClick, additive = false }) {
+function IngredientRows({ ingredients, category, onIngredientClick, additive = false }) {
   return (
     <div className="report-row-list ingredient-row-list">
       {ingredients.map((ingredient, index) => {
@@ -5396,7 +5220,7 @@ function IngredientRows({ ingredients, onIngredientClick, additive = false }) {
           <button
             className="ingredient-report-row"
             key={`${ingredient.name}-${ingredient.type || index}`}
-            onClick={() => onIngredientClick(ingredient)}
+            onClick={() => onIngredientClick({ ...ingredient, productCategory: category })}
           >
             <span className={`status-dot ${ingredient.risk === "safe" ? "green" : ingredient.risk === "harmful" ? "red" : "yellow"}`} />
             <span className="ingredient-report-copy">
@@ -5418,12 +5242,6 @@ function normalizeListedName(value) {
   return cleaned.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function findIngredientDetails(name) {
-  const target = cleanText(name).toLowerCase();
-  const entry = Object.entries(ingredientDetails).find(([key]) => key.toLowerCase() === target);
-  return entry?.[1] || null;
-}
-
 function getProductAdditives(product) {
   const ingredientAdditives = (product.ingredients || []).filter((ingredient) =>
     /additive|preservative|color|flavo[u]?r|emulsifier|stabili[sz]er|sweetener/i.test(`${ingredient.type || ""} ${ingredient.name}`)
@@ -5435,12 +5253,7 @@ function getProductAdditives(product) {
       const tagName = name.toLowerCase();
       return ingredientName === tagName || ingredientName.includes(tagName) || tagName.includes(ingredientName);
     });
-    const details = findIngredientDetails(name);
-    return matchingIngredient || {
-      name,
-      type: details?.type || "Listed additive",
-      risk: details?.risk || "unknown"
-    };
+    return matchingIngredient || createIngredientRecordFromLabel(name, "food");
   });
   const unique = new Map();
   [...ingredientAdditives, ...tagAdditives].forEach((item) => unique.set(item.name.toLowerCase(), item));
@@ -5538,6 +5351,7 @@ function getEvaluationState(product, area) {
   }
   if (area === "ingredients") {
     if (!product.ingredients?.length) return "Needs data";
+    if (counts.unknown > 0) return "Needs data";
     if (counts.harmful > 0) return "Poor";
     if (counts.moderate > 1) return "Moderate";
     return counts.moderate ? "Good" : "Excellent";
@@ -6427,58 +6241,107 @@ function FoodContributionSheet({ target, plateState, onClose, onUpdate, onRemove
 }
 
 function IngredientSheet({ ingredient, onClose }) {
-  const knownDetails = findIngredientDetails(ingredient.name);
-  const fallback = {
-    risk: ingredient.risk || "unknown",
-    type: ingredient.type || "Purpose not available",
-    why: ingredient.risk === "unknown"
-      ? "The available reference data is not detailed enough to assign a concern level. This does not mean the ingredient is safe or harmful."
-      : ingredient.risk === "safe"
-        ? "Low concern for typical use in the available reference data. Individual allergies or sensitivities can still matter."
-        : "This ingredient may merit review depending on amount, frequency, sensitivity, and product type.",
-    common: "Products that list this ingredient on the label",
-    alternatives: "A simpler alternative depends on the ingredient's function and the product type.",
-    sources: ["Ingredient reference", "Chemical reference"]
-  };
-  const details = knownDetails || fallback;
-  const risk = riskMeta[details.risk || ingredient.risk] || riskMeta.unknown;
-  const use = getIngredientUse(details.type || ingredient.type);
+  const localKnowledge = useMemo(
+    () => resolveLocalIngredientKnowledge(ingredient.originalLabelText || ingredient.name, { category: ingredient.productCategory }),
+    [ingredient.name, ingredient.originalLabelText, ingredient.productCategory]
+  );
+  const [knowledge, setKnowledge] = useState(localKnowledge);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setKnowledge(localKnowledge);
+    setLoading(true);
+    enrichIngredientKnowledge(ingredient.originalLabelText || ingredient.name, { category: ingredient.productCategory })
+      .then((result) => {
+        if (!cancelled) setKnowledge(result);
+      })
+      .catch(() => {
+        if (!cancelled) setKnowledge({ ...localKnowledge, enrichmentStatus: "unavailable" });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ingredient.name, ingredient.originalLabelText, ingredient.productCategory, localKnowledge]);
+
+  const risk = riskMeta[knowledge.risk || ingredient.risk] || riskMeta.unknown;
+  const originalDiffers = knowledge.originalLabelText
+    && normalizeKnowledgeDisplay(knowledge.originalLabelText) !== normalizeKnowledgeDisplay(knowledge.canonicalName);
+  const aliases = (knowledge.aliases || []).filter((alias) => normalizeKnowledgeDisplay(alias) !== normalizeKnowledgeDisplay(knowledge.canonicalName)).slice(0, 8);
   return (
     <div className="sheet-backdrop" onClick={onClose}>
-      <div className="ingredient-sheet" onClick={(event) => event.stopPropagation()}>
+      <div className="ingredient-sheet" role="dialog" aria-modal="true" aria-label={`${knowledge.canonicalName} details`} onClick={(event) => event.stopPropagation()}>
         <div className="sheet-handle" />
         <div className="sheet-header">
           <div>
             <span className={`risk-pill ${risk.className}`}>{risk.label}</span>
-            <h2>{ingredient.name}</h2>
+            <h2>{knowledge.canonicalName}</h2>
           </div>
-          <button onClick={onClose}>
+          <button onClick={onClose} aria-label="Close ingredient details">
             <X size={20} />
           </button>
         </div>
-        <InfoBlock label="What it is" value={details.type || ingredient.type || "Reference details are not available."} />
-        <InfoBlock label="Why it is used" value={use} />
-        <InfoBlock label={risk.label === "Safe" ? "Concern summary" : "Why it may be flagged"} value={details.why} />
-        <InfoBlock label="Commonly found in" value={details.common} />
-        <InfoBlock label="Simpler alternatives" value={details.alternatives} />
-        <InfoBlock label="Evidence summary" value={knownDetails ? "Ziya applies a cautious category-specific review of the available ingredient references. Concern can depend on dose, product type, and individual sensitivity." : "Detailed evidence has not been matched for this listed ingredient yet."} />
+        {loading && <p className="knowledge-status">Checking source records…</p>}
+        {(originalDiffers || knowledge.translationConfidence === "low") && (
+          <InfoBlock
+            label="Original label text"
+            value={`${knowledge.originalLabelText}${knowledge.translationConfidence === "low" ? " · Translation needs review; verify label" : ""}`}
+          />
+        )}
+        {aliases.length > 0 && <InfoBlock label="Also known as" value={aliases.join(", ")} />}
+        <InfoBlock label="What it is" value={knowledge.type} />
+        <InfoBlock label="Why it is used" value={knowledge.use} />
+        <InfoBlock label="Commonly found in" value={knowledge.commonUse} />
+        <InfoBlock label="Plain-English summary" value={knowledge.summary} />
+        <InfoBlock label="Evidence summary" value={knowledge.evidenceSummary} />
+        <InfoBlock label="Regulatory context" value={knowledge.regulatoryContext} />
+        {knowledge.chemicalProperties && (
+          <InfoBlock
+            label="Chemical identity"
+            value={[
+              knowledge.pubchemCid ? `PubChem CID ${knowledge.pubchemCid}` : null,
+              knowledge.chemicalProperties.molecularFormula,
+              knowledge.chemicalProperties.molecularWeight ? `${knowledge.chemicalProperties.molecularWeight} g/mol` : null,
+              knowledge.chemicalProperties.iupacName
+            ].filter(Boolean).join(" · ")}
+          />
+        )}
+        <InfoBlock label="Data confidence" value={`${capitalizeKnowledge(knowledge.confidence)} · ${knowledge.dataSources?.join(" · ") || "Local match not available"}`} />
+        {knowledge.studies?.length > 0 && (
+          <div className="knowledge-citations">
+            <span>Relevant literature</span>
+            {knowledge.studies.map((study) => (
+              <a href={study.url} key={study.pmid} target="_blank" rel="noreferrer">
+                <strong>{study.title}</strong>
+                <small>{[study.journal, study.year, study.sourceType].filter(Boolean).join(" · ")}</small>
+              </a>
+            ))}
+          </div>
+        )}
         <div className="source-list">
-          <span>Scientific and reference sources</span>
-          {details.sources?.map((source) => (
-            <a
-              href={sourceLinks[source] || sourceLinks["Ingredient reference"]}
-              key={source}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {source}
-            </a>
+          <span>Sources</span>
+          {knowledge.sources?.map((source) => (
+            <a href={source.url} key={source.id || source.url} title={source.title} target="_blank" rel="noreferrer">{source.label}</a>
           ))}
-          <p className="methodology-copy">Methodology: ingredient references are summarized conservatively and do not establish that a product will cause harm.</p>
+          {!knowledge.sources?.length && <p className="methodology-copy">No strong source links found yet.</p>}
+          {knowledge.enrichmentStatus === "unavailable" && <p className="methodology-copy">More source data unavailable right now.</p>}
+          <p className="methodology-copy">Methodology: curated records take priority; chemical identity and citation metadata add context but do not establish that an ingredient will cause harm.</p>
         </div>
       </div>
     </div>
   );
+}
+
+function normalizeKnowledgeDisplay(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function capitalizeKnowledge(value) {
+  const text = String(value || "low");
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function ExpandableSection({ id, title, subtitle, icon: Icon, expandedSection, setExpandedSection, children }) {
@@ -6498,20 +6361,6 @@ function ExpandableSection({ id, title, subtitle, icon: Icon, expandedSection, s
       {open && <div className="expand-body">{children}</div>}
     </section>
   );
-}
-
-function getIngredientUse(type = "") {
-  const value = type.toLowerCase();
-  if (/preservative/.test(value)) return "Helps protect the formula from spoilage and extend shelf life.";
-  if (/color|dye/.test(value)) return "Adds or standardizes product color.";
-  if (/flavo[u]?r/.test(value)) return "Adds or maintains flavor.";
-  if (/surfactant/.test(value)) return "Helps lift oils and dirt or create foam.";
-  if (/emulsifier|stabili[sz]er/.test(value)) return "Helps ingredients stay evenly mixed and maintains texture.";
-  if (/sweetener/.test(value)) return "Adds sweetness.";
-  if (/oil|emollient/.test(value)) return "Contributes texture, moisture, or fat.";
-  if (/protein/.test(value)) return "Contributes protein or structure to the product.";
-  if (/fiber|grain|nut|legume|botanical/.test(value)) return "Serves as a primary food, plant, or material component.";
-  return "Its exact function is not available in the current reference data.";
 }
 
 function BottomNav({ activeTab, setActiveTab }) {
@@ -6611,12 +6460,15 @@ function InfoBlock({ label, value }) {
 
 export {
   calculateDailyTotals,
+  createManualReport,
   createPlateEntry,
   getLocalDateKey,
   getNutritionLogProfile,
   loadPlateState,
   lookupProductByBarcode,
+  mapOpenFoodFactsIngredients,
   mapOpenFoodFactsNutrition,
+  normalizeOpenFoodFactsProduct,
   normalizeNutritionForServing,
   sanitizePlateGoals,
   shiftLocalDateKey,
