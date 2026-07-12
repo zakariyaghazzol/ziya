@@ -40,7 +40,8 @@ import "./styles.css";
 const riskMeta = {
   safe: { label: "Safe", className: "risk-safe" },
   moderate: { label: "Moderate", className: "risk-moderate" },
-  harmful: { label: "Harmful", className: "risk-harmful" }
+  harmful: { label: "Higher concern", className: "risk-harmful" },
+  unknown: { label: "Needs review", className: "risk-unknown" }
 };
 
 const categoryMeta = {
@@ -4882,9 +4883,15 @@ function ReportScreen({
   const confidenceStatus = getConfidence(product);
   const imageStatus = getImageStatus(product);
   const showImageStatus = imageStatus !== confidenceStatus && ["Placeholder", "User Photo"].includes(imageStatus);
-  const flaggedIngredients = (product.actionIngredients?.length
-    ? product.actionIngredients
-    : product.ingredients?.filter((ingredient) => ingredient.risk !== "safe").map((ingredient) => ingredient.name)) || [];
+  const concerns = product.concerns || [];
+  const positives = product.positives || [];
+  const ingredients = product.ingredients || [];
+  const additives = getProductAdditives(product);
+  const allergens = getAllergenGroups(product.allergens);
+  const nutritionCount = getAvailableNutritionRows(product.nutrition).length;
+  const ingredientSubtitle = ingredients.length
+    ? `${ingredients.length} ingredients · ${counts.moderate + counts.harmful} flagged`
+    : "Needs label";
 
   return (
     <div className="stack report-screen">
@@ -4923,51 +4930,15 @@ function ReportScreen({
         </>
       ) : (
         <>
-          {isTextile ? <TextileSummary product={product} /> : null}
-
-          <ReportAtAGlance product={product} />
-          <LabelCompletionPanel product={product} onCompleteLabel={onCompleteLabel} />
-
-          {!isTextile && !product.analysisPending && product.breakdown?.length > 0 && (
-            <ExpandableSection
-              id="breakdown"
-              title="Score breakdown"
-              subtitle="Nutrition, ingredients, and processing"
-              icon={FlaskConical}
-              expandedSection={expandedSection}
-              setExpandedSection={setExpandedSection}
-            >
-              <ScoreSummary product={product} />
-              <div className="report-detail-rows">
-                {product.breakdown.map((item) => (
-                  <div className="report-detail-row" key={item.label}>
-                    <div>
-                      <strong>{item.label}</strong>
-                      <span>{item.detail}</span>
-                    </div>
-                    <em>{item.value}</em>
-                  </div>
-                ))}
-              </div>
-            </ExpandableSection>
-          )}
-
           <ExpandableSection
             id="concerns"
-            title={isTextile ? "Material notes" : "All concerns"}
-            subtitle={`${product.concerns?.length || 0} ${product.concerns?.length === 1 ? "reason" : "reasons"}`}
+            title={isTextile ? "Material notes" : "Main concerns"}
+            subtitle={`${concerns.length} ${concerns.length === 1 ? "concern" : "concerns"}`}
             icon={AlertTriangle}
             expandedSection={expandedSection}
             setExpandedSection={setExpandedSection}
           >
-            <div className="simple-list">
-              {product.concerns?.map((item) => (
-                <div className="simple-row" key={item}>
-                  <span className="status-dot red" />
-                  <span>{item}</span>
-                </div>
-              ))}
-            </div>
+            <ReportFactList items={concerns} tone="red" kind="concern" />
           </ExpandableSection>
 
           <ExpandableSection
@@ -4978,55 +4949,91 @@ function ReportScreen({
             expandedSection={expandedSection}
             setExpandedSection={setExpandedSection}
           >
-            <div className="simple-list">
-              {product.positives?.map((item) => (
-                <div className="simple-row" key={item}>
-                  <span className="status-dot green" />
-                  <span>{item}</span>
-                </div>
-              ))}
-            </div>
+            <ReportFactList items={positives} tone="green" kind="positive" />
           </ExpandableSection>
 
-          {(product.ingredients?.length > 0 || isTextile) && (
-            <ExpandableSection
-              id="ingredients"
-              title={isTextile ? "Material details" : "Ingredient details"}
-              subtitle={`${product.ingredients?.length || 0} listed - ${counts.moderate + counts.harmful} flagged`}
-              icon={Info}
-              expandedSection={expandedSection}
-              setExpandedSection={setExpandedSection}
-            >
-              <div className="risk-counts">
-                <RiskCount label="Safe" value={counts.safe} type="safe" />
-                <RiskCount label="Moderate" value={counts.moderate} type="moderate" />
-                <RiskCount label="Harmful" value={counts.harmful} type="harmful" />
-              </div>
-              <div className="ingredient-chips">
-                {product.ingredients?.slice(0, 8).map((ingredient) => (
-                  <button
-                    className={`ingredient-chip ${riskMeta[ingredient.risk].className}`}
-                    key={`${ingredient.name}-${ingredient.type}`}
-                    onClick={() => onIngredientClick(ingredient)}
-                  >
-                    {ingredient.name}
-                  </button>
-                ))}
-              </div>
-            </ExpandableSection>
-          )}
+          <ExpandableSection
+            id="ingredients"
+            title={isTextile ? "Materials" : "Ingredients"}
+            subtitle={isTextile ? `${ingredients.length} materials listed` : ingredientSubtitle}
+            icon={Info}
+            expandedSection={expandedSection}
+            setExpandedSection={setExpandedSection}
+          >
+            {ingredients.length ? (
+              <IngredientRows ingredients={ingredients} onIngredientClick={onIngredientClick} />
+            ) : (
+              <MissingReportData copy={isTextile ? "Add the material tag to complete this summary." : "Add the ingredient label to complete this report."} />
+            )}
+          </ExpandableSection>
 
-          {product.category === "food" && !product.analysisPending && (
-            <ExpandableSection
-              id="nutrition"
-              title="Nutrition"
-              subtitle={hasNumber(product.nutrition?.calories) ? `${product.nutrition.calories} calories - tap for macros` : "Needs label"}
-              icon={Utensils}
-              expandedSection={expandedSection}
-              setExpandedSection={setExpandedSection}
-            >
-              <FoodNutrition product={product} onAddToDailyLog={onAddToDailyLog} embedded />
-            </ExpandableSection>
+          <LabelCompletionPanel product={product} onCompleteLabel={onCompleteLabel} />
+
+          {isTextile ? <TextileSummary product={product} /> : null}
+
+          {product.category === "food" && (
+            <>
+              <ExpandableSection
+                id="nutrition"
+                title="Nutrition"
+                subtitle={nutritionCount ? "Tap for details" : "Needs label"}
+                icon={Utensils}
+                expandedSection={expandedSection}
+                setExpandedSection={setExpandedSection}
+              >
+                <FoodNutrition product={product} onAddToDailyLog={onAddToDailyLog} embedded />
+              </ExpandableSection>
+
+              <ExpandableSection
+                id="additives"
+                title="Additives"
+                subtitle={additives.length ? `${additives.length} listed` : product.fieldConfidence?.additives === "Missing" ? "Needs label" : "None listed"}
+                icon={FlaskConical}
+                expandedSection={expandedSection}
+                setExpandedSection={setExpandedSection}
+              >
+                {additives.length ? (
+                  <IngredientRows ingredients={additives} onIngredientClick={onIngredientClick} additive />
+                ) : (
+                  <MissingReportData copy={product.fieldConfidence?.additives === "Missing" ? "Add the ingredient label to review additives." : "No additives are listed in the available product data."} />
+                )}
+              </ExpandableSection>
+
+              <ExpandableSection
+                id="processing"
+                title="Processing"
+                subtitle={product.processing || "Not evaluated"}
+                icon={Zap}
+                expandedSection={expandedSection}
+                setExpandedSection={setExpandedSection}
+              >
+                <ProcessingDetails product={product} />
+              </ExpandableSection>
+
+              <ExpandableSection
+                id="allergens"
+                title="Allergens"
+                subtitle={getAllergenSubtitle(allergens, product.allergens)}
+                icon={ShieldCheck}
+                expandedSection={expandedSection}
+                setExpandedSection={setExpandedSection}
+              >
+                <AllergenDetails groups={allergens} rawValue={product.allergens} />
+              </ExpandableSection>
+
+              {!product.analysisPending && (
+                <ExpandableSection
+                  id="evaluation"
+                  title="How this was evaluated"
+                  subtitle="4 evaluation areas"
+                  icon={FlaskConical}
+                  expandedSection={expandedSection}
+                  setExpandedSection={setExpandedSection}
+                >
+                  <EvaluationSummary product={product} />
+                </ExpandableSection>
+              )}
+            </>
           )}
 
           {product.category === "household" && (
@@ -5049,19 +5056,12 @@ function ReportScreen({
             </ExpandableSection>
           )}
 
-          <Alternatives product={product} productIndex={productIndex} onOpenProduct={onOpenProduct} />
-
-          <TakeAction
+          <Alternatives
             product={product}
-            flaggedIngredients={flaggedIngredients}
-            open={actionOpen}
-            setOpen={setActionOpen}
-            platform={platform}
-            setPlatform={setPlatform}
-            tone={messageTone}
-            setTone={setMessageTone}
-            copied={copied}
-            setCopied={setCopied}
+            productIndex={productIndex}
+            onOpenProduct={onOpenProduct}
+            expandedSection={expandedSection}
+            setExpandedSection={setExpandedSection}
           />
         </>
       )}
@@ -5069,73 +5069,229 @@ function ReportScreen({
   );
 }
 
-function ReportAtAGlance({ product }) {
-  const concernItems = product.concerns?.slice(0, 2) || [];
-  const supportItems =
-    product.category === "household"
-      ? product.safetyNotes?.slice(0, 2) || []
-      : product.category === "textile"
-        ? [
-            product.washBeforeUse ? "Wash before first use" : "Review care label",
-            product.sensitiveSkinNotes
-          ].filter(Boolean).slice(0, 2)
-        : product.positives?.slice(0, 2) || [];
-  const supportTitle =
-    product.category === "household"
-      ? "Safety notes"
-      : product.category === "textile"
-        ? "Wear notes"
-        : "Positives";
-  const supportDot = product.category === "household" || product.category === "textile" ? "yellow" : "green";
-
+function ReportFactList({ items, tone, kind }) {
+  if (!items.length) return <MissingReportData copy={kind === "positive" ? "No verified positives are available." : "No concerns are listed in the available data."} />;
   return (
-    <section className="card report-reasons">
-      <div className="report-reason-group">
-        <span>{product.category === "textile" ? "Material notes" : "Main concerns"}</span>
-        <div className="report-native-list">
-          {concernItems.map((item) => (
-            <div className="report-native-row" key={item}>
-              <span className="status-dot red" />
-              <strong>{item}</strong>
-            </div>
-          ))}
+    <div className="report-row-list">
+      {items.map((item) => (
+        <div className="report-fact-row" key={item}>
+          <span className={`status-dot ${tone}`} />
+          <div>
+            <strong>{item}</strong>
+            <span>{getFactExplanation(item, kind)}</span>
+          </div>
         </div>
-      </div>
-      <div className="report-reason-group">
-        <span>{supportTitle}</span>
-        <div className="report-native-list">
-          {supportItems.map((item) => (
-            <div className="report-native-row" key={item}>
-              <span className={`status-dot ${supportDot}`} />
-              <strong>{item}</strong>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
+      ))}
+    </div>
   );
 }
 
-function ScoreSummary({ product }) {
-  const computed =
-    product.category === "food"
-      ? product.scoring || scoreFoodProduct(product)
-      : product.category === "beauty"
-        ? { total: scoreBeautyProduct(product), nutrition: null, ingredients: null, processing: null }
-        : { total: scoreHouseholdProduct(product), nutrition: null, ingredients: null, processing: null };
-  return product.category === "food" ? (
-    <div className="score-summary-compact">
-      <p>Nutrition, ingredients, and processing are scored separately.</p>
-      <div className="score-bars">
-          <ScoreBar label="Nutrition" value={computed.nutrition} max={50} />
-          <ScoreBar label="Ingredients" value={computed.ingredients} max={35} />
-          <ScoreBar label="Processing" value={computed.processing} max={15} />
-      </div>
+function getFactExplanation(item, kind) {
+  const text = item.toLowerCase();
+  if (kind === "positive") {
+    if (text.includes("sugar")) return "Lower sugar in the available serving data.";
+    if (text.includes("protein")) return "A useful amount of protein per serving.";
+    if (text.includes("fiber")) return "Provides fiber in the available nutrition data.";
+    if (text.includes("ingredient")) return "The available ingredient list is comparatively short.";
+    return "A favorable feature in the available product data.";
+  }
+  if (text.includes("additive")) return "The label lists additives that may merit a closer look.";
+  if (text.includes("ultra") || text.includes("processing")) return "The formulation appears highly processed.";
+  if (text.includes("sodium")) return "Sodium is elevated for the available serving data.";
+  if (text.includes("sugar")) return "Sugar is elevated for the available serving data.";
+  if (text.includes("saturated")) return "Saturated fat is elevated for the available serving data.";
+  return "Flagged for review based on the available product data.";
+}
+
+function MissingReportData({ copy }) {
+  return <p className="report-missing">{copy}</p>;
+}
+
+function IngredientRows({ ingredients, onIngredientClick, additive = false }) {
+  return (
+    <div className="report-row-list ingredient-row-list">
+      {ingredients.map((ingredient, index) => {
+        const risk = riskMeta[ingredient.risk] || riskMeta.unknown;
+        return (
+          <button
+            className="ingredient-report-row"
+            key={`${ingredient.name}-${ingredient.type || index}`}
+            onClick={() => onIngredientClick(ingredient)}
+          >
+            <span className={`status-dot ${ingredient.risk === "safe" ? "green" : ingredient.risk === "harmful" ? "red" : "yellow"}`} />
+            <span className="ingredient-report-copy">
+              <strong>{ingredient.name}</strong>
+              <small>{ingredient.type || (additive ? "Listed additive" : "Purpose not available")}</small>
+            </span>
+            <span className={`ingredient-risk-label ${risk.className}`}>{risk.label}</span>
+            <ChevronRight size={17} />
+          </button>
+        );
+      })}
     </div>
-  ) : (
-    <p className="report-detail-note">
-      This score uses category-specific ingredient, irritation, fragrance, and caution rules.
-    </p>
+  );
+}
+
+function normalizeListedName(value) {
+  const cleaned = cleanText(value).replace(/^[a-z]{2}:/i, "").replace(/_/g, " ").replace(/-/g, " ");
+  if (/^e\s*\d+/i.test(cleaned)) return cleaned.replace(/^e\s*/i, "E").toUpperCase();
+  return cleaned.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function findIngredientDetails(name) {
+  const target = cleanText(name).toLowerCase();
+  const entry = Object.entries(ingredientDetails).find(([key]) => key.toLowerCase() === target);
+  return entry?.[1] || null;
+}
+
+function getProductAdditives(product) {
+  const ingredientAdditives = (product.ingredients || []).filter((ingredient) =>
+    /additive|preservative|color|flavo[u]?r|emulsifier|stabili[sz]er|sweetener/i.test(`${ingredient.type || ""} ${ingredient.name}`)
+  );
+  const tagAdditives = (product.additives?.tags || []).map((tag) => {
+    const name = normalizeListedName(tag);
+    const matchingIngredient = (product.ingredients || []).find((ingredient) => {
+      const ingredientName = ingredient.name.toLowerCase();
+      const tagName = name.toLowerCase();
+      return ingredientName === tagName || ingredientName.includes(tagName) || tagName.includes(ingredientName);
+    });
+    const details = findIngredientDetails(name);
+    return matchingIngredient || {
+      name,
+      type: details?.type || "Listed additive",
+      risk: details?.risk || "unknown"
+    };
+  });
+  const unique = new Map();
+  [...ingredientAdditives, ...tagAdditives].forEach((item) => unique.set(item.name.toLowerCase(), item));
+  return [...unique.values()];
+}
+
+function getAvailableNutritionRows(nutrition = {}) {
+  const definitions = [
+    ["Serving size", "servingSize", ""],
+    ["Calories", "calories", ""],
+    ["Protein", "protein", "g"],
+    ["Carbohydrates", "carbs", "g"],
+    ["Fat", "fat", "g"],
+    ["Saturated fat", "saturatedFat", "g"],
+    ["Sugar", "sugar", "g"],
+    ["Fiber", "fiber", "g"],
+    ["Sodium", "sodium", "mg"]
+  ];
+  return definitions
+    .filter(([, key]) => key === "servingSize" ? Boolean(cleanText(nutrition[key])) : hasNumber(nutrition[key]))
+    .map(([label, key, unit]) => ({ label, value: `${nutrition[key]}${unit}` }));
+}
+
+function getAllergenGroups(value) {
+  const raw = cleanText(value);
+  if (!raw || /no major|not listed|unknown|none/i.test(raw)) return { contains: [], mayContain: [] };
+  const normalized = raw.replace(/^contains\s+/i, "");
+  const parts = normalized.split(/\bmay contain\b/i);
+  const parse = (text) => text
+    .split(/,|\band\b|;/i)
+    .map((item) => cleanText(item).replace(/^[:\s-]+/, ""))
+    .filter(Boolean)
+    .map((item) => item.charAt(0).toUpperCase() + item.slice(1));
+  return { contains: parse(parts[0] || ""), mayContain: parse(parts[1] || "") };
+}
+
+function getAllergenSubtitle(groups, rawValue) {
+  const listed = [...groups.contains, ...groups.mayContain];
+  if (listed.length) return listed.slice(0, 3).join(", ");
+  return rawValue ? "No major allergens listed" : "Needs label";
+}
+
+function AllergenDetails({ groups, rawValue }) {
+  if (!groups.contains.length && !groups.mayContain.length) {
+    return <MissingReportData copy={rawValue ? "No major allergens are listed in the available data. Review the physical label to confirm." : "The allergen statement is not available. Review the physical label before use."} />;
+  }
+  return (
+    <div className="allergen-groups">
+      {groups.contains.length > 0 && <AllergenGroup title="Contains" items={groups.contains} />}
+      {groups.mayContain.length > 0 && <AllergenGroup title="May contain" items={groups.mayContain} />}
+      <p>Review the physical label for the most current allergen statement.</p>
+    </div>
+  );
+}
+
+function AllergenGroup({ title, items }) {
+  return (
+    <div>
+      <strong>{title}</strong>
+      <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
+    </div>
+  );
+}
+
+function ProcessingDetails({ product }) {
+  const processing = product.processing;
+  if (!processing || /unknown/i.test(processing)) return <MissingReportData copy="Processing could not be evaluated from the available label data." />;
+  const reasons = [];
+  if (/ultra/i.test(processing)) reasons.push("The available product data classifies the formulation as highly processed.");
+  if ((product.additives?.count || 0) > 0) reasons.push("The label lists formulated additives.");
+  if ((product.ingredients || []).length > 10) reasons.push("The available ingredient list is relatively long.");
+  if (!reasons.length) reasons.push("This classification comes from the available formulation and label data.");
+  const nova = product.breakdown?.find((item) => item.label === "Processing")?.detail?.match(/NOVA\s+\d/i)?.[0];
+  return (
+    <div className="processing-details">
+      <strong>{processing}</strong>
+      <p>This product appears {processing.toLowerCase()} because:</p>
+      <ul>{reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+      {nova && <span>{nova} · a secondary processing classification</span>}
+      <small>Processing describes formulation, not a medical diagnosis.</small>
+    </div>
+  );
+}
+
+function getEvaluationState(product, area) {
+  const counts = getRiskCounts(product.ingredients || []);
+  if (area === "nutrition") {
+    if (!hasCoreFoodNutrition(product.nutrition)) return "Needs data";
+    const value = product.scoring?.nutrition;
+    if (!hasNumber(value)) return "Not evaluated";
+    if (value >= 42) return "Excellent";
+    if (value >= 34) return "Good";
+    if (value >= 24) return "Moderate";
+    return "Poor";
+  }
+  if (area === "ingredients") {
+    if (!product.ingredients?.length) return "Needs data";
+    if (counts.harmful > 0) return "Poor";
+    if (counts.moderate > 1) return "Moderate";
+    return counts.moderate ? "Good" : "Excellent";
+  }
+  if (area === "processing") {
+    if (!product.processing || /unknown/i.test(product.processing)) return "Needs data";
+    if (/ultra/i.test(product.processing)) return "Poor";
+    if (/minimal/i.test(product.processing)) return "Excellent";
+    return "Moderate";
+  }
+  const additives = getProductAdditives(product);
+  if (product.fieldConfidence?.additives === "Missing") return "Needs data";
+  if (additives.some((item) => item.risk === "harmful")) return "Poor";
+  if (additives.some((item) => item.risk === "moderate" || item.risk === "unknown")) return "Moderate";
+  return additives.length ? "Good" : "Excellent";
+}
+
+function EvaluationSummary({ product }) {
+  const rows = [
+    ["Nutrition", getEvaluationState(product, "nutrition")],
+    ["Ingredient quality", getEvaluationState(product, "ingredients")],
+    ["Processing", getEvaluationState(product, "processing")],
+    ["Additives", getEvaluationState(product, "additives")]
+  ];
+  return (
+    <div className="evaluation-summary">
+      {rows.map(([label, value]) => (
+        <div key={label}><span>{label}</span><strong className={`evaluation-${value.toLowerCase().replace(/\s+/g, "-")}`}>{value}</strong></div>
+      ))}
+      <details className="methodology-note">
+        <summary>Methodology</summary>
+        <p>Ziya considers available nutrition, ingredient concerns, additives, and processing. These signals support comparison; they are not absolute scientific or medical judgments.</p>
+      </details>
+    </div>
   );
 }
 
@@ -5220,40 +5376,24 @@ function MedicineSummary({ product }) {
 function FoodNutrition({ product, onAddToDailyLog, embedded = false }) {
   const n = product.nutrition || {};
   const canLog = hasNumber(n.calories);
+  const rows = getAvailableNutritionRows(n);
   return (
     <section className={`${embedded ? "nutrition-card-embedded" : "card nutrition-card"}`}>
-      <div className="section-heading">
-        <div>
-          <span className="eyebrow">Nutrition</span>
-          <h2>Calories and macros</h2>
-        </div>
-        <div className="nutrition-status">
-          <ConfidenceBadge status={product.nutritionConfidence || getConfidence(product)} />
-          <Utensils size={21} />
-        </div>
-      </div>
       {product.nutritionConfidence === "Estimated" && (
         <p className="estimate-note">Nutrition is estimated from a fallback nutrition search. Confirm the label when available.</p>
       )}
-      <div className="macro-grid macro-grid-primary">
-        <Macro label="Calories" value={n.calories} unit="" />
-        <Macro label="Protein" value={n.protein} unit="g" />
-        <Macro label="Carbs" value={n.carbs} unit="g" />
-        <Macro label="Fat" value={n.fat} unit="g" />
-      </div>
-      <details className="nutrition-more">
-        <summary>
-          More nutrition
-          <ChevronDown size={18} />
-        </summary>
-        <div className="macro-grid nutrition-secondary-grid">
-          <Macro label="Serving" value={n.servingSize} unit="" />
-          <Macro label="Sugar" value={n.sugar} unit="g" />
-          <Macro label="Sodium" value={n.sodium} unit="mg" />
-          <Macro label="Sat. fat" value={n.saturatedFat} unit="g" />
-          <Macro label="Fiber" value={n.fiber} unit="g" />
+      {rows.length ? (
+        <div className="nutrition-row-list">
+          {rows.map((row) => (
+            <div key={row.label}>
+              <span>{row.label}</span>
+              <strong>{row.value}</strong>
+            </div>
+          ))}
         </div>
-      </details>
+      ) : (
+        <MissingReportData copy="Nutrition facts are not available. Add the label to complete this section." />
+      )}
       <button className="primary-button full" onClick={() => onAddToDailyLog(product)} disabled={!canLog}>
         <Plus size={18} />
         {canLog ? "Add to Daily Log" : "Calories missing"}
@@ -5262,31 +5402,116 @@ function FoodNutrition({ product, onAddToDailyLog, embedded = false }) {
   );
 }
 
-function Alternatives({ product, productIndex, onOpenProduct }) {
-  const alternatives = (product.alternatives || []).map((id) => productIndex.get(id)).filter(Boolean);
-  if (!alternatives.length) return null;
+const comparableTypePatterns = {
+  popcorn: /popcorn/i,
+  crackers: /cracker|cheddar square/i,
+  cereal: /cereal|granola/i,
+  bars: /protein bar|snack bar|energy bar|granola bar/i,
+  spreads: /peanut butter|hazelnut spread|nut butter|seed butter/i,
+  soda: /soda|soft drink|cola/i,
+  shampoo: /shampoo/i,
+  lotion: /lotion|moisturizer/i,
+  deodorant: /deodorant|antiperspirant/i,
+  detergent: /laundry detergent/i,
+  dishSoap: /dish soap|dishwashing liquid/i,
+  cleaner: /all purpose cleaner|all-purpose cleaner|surface cleaner/i,
+  shirt: /shirt|tee|t-shirt/i,
+  towel: /towel/i
+};
+
+function getComparableTypes(product) {
+  const text = `${product.name || ""} ${product.categoryPath || ""} ${product.description || ""}`;
+  return Object.entries(comparableTypePatterns).filter(([, pattern]) => pattern.test(text)).map(([type]) => type);
+}
+
+function getAlternativeReason(source, candidate, sharedType) {
+  const typeLabels = {
+    popcorn: "popcorn snack",
+    crackers: "savory cracker",
+    cereal: "cereal",
+    bars: "snack bar",
+    spreads: "spread",
+    soda: "soft drink",
+    shampoo: "shampoo",
+    lotion: "moisturizer",
+    deodorant: "deodorant",
+    detergent: "laundry detergent",
+    dishSoap: "dish soap",
+    cleaner: "surface cleaner",
+    shirt: "shirt",
+    towel: "towel"
+  };
+  const improvements = [];
+  if (hasNumber(candidate.score) && hasNumber(source.score) && candidate.score > source.score) improvements.push("better overall evaluation");
+  if ((candidate.ingredients?.length || Infinity) < (source.ingredients?.length || 0)) improvements.push("shorter ingredient list");
+  if (getProductAdditives(candidate).length < getProductAdditives(source).length) improvements.push("fewer listed additives");
+  if (/minimal/i.test(candidate.processing || "") && !/minimal/i.test(source.processing || "")) improvements.push("less processing");
+  return `Similar ${typeLabels[sharedType] || "product"} · ${improvements[0] || "more complete product data"}`;
+}
+
+function getComparableAlternatives(product, productIndex) {
+  if (!productIndex || ["medicine", "unknown"].includes(product.category)) return [];
+  const sourceTypes = getComparableTypes(product);
+  if (!sourceTypes.length) return [];
+  const preferred = new Set(product.alternatives || []);
+  const verifiedSampleIds = new Set(["pop-secret", "skinny-pop"]);
+  return [...productIndex.values()]
+    .filter((candidate) =>
+      candidate.id !== product.id
+      && candidate.category === product.category
+      && !candidate.analysisPending
+      && (["food-provider", "barcode-provider"].includes(candidate.sourceType) || verifiedSampleIds.has(candidate.id))
+    )
+    .map((candidate) => {
+      const candidateTypes = getComparableTypes(candidate);
+      const sharedType = sourceTypes.find((type) => candidateTypes.includes(type));
+      if (!sharedType) return null;
+      const scoreImprovement = hasNumber(candidate.score) && hasNumber(product.score) && candidate.score > product.score;
+      const additiveImprovement = getProductAdditives(candidate).length < getProductAdditives(product).length;
+      const ingredientImprovement = candidate.ingredients?.length > 0 && candidate.ingredients.length < (product.ingredients?.length || Infinity);
+      const processingImprovement = /minimal/i.test(candidate.processing || "") && !/minimal/i.test(product.processing || "");
+      if (!scoreImprovement && !additiveImprovement && !ingredientImprovement && !processingImprovement) return null;
+      const completeness = [candidate.image, candidate.ingredients?.length, hasCoreFoodNutrition(candidate.nutrition)].filter(Boolean).length;
+      return {
+        product: candidate,
+        sharedType,
+        rank: (preferred.has(candidate.id) ? 3 : 0) + (scoreImprovement ? 3 : 0) + (additiveImprovement ? 2 : 0) + completeness
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.rank - a.rank)
+    .slice(0, 3);
+}
+
+function Alternatives({ product, productIndex, onOpenProduct, expandedSection, setExpandedSection }) {
+  const alternatives = getComparableAlternatives(product, productIndex);
   return (
-    <section className="card">
-      <div className="section-heading">
-        <div>
-          <span className="eyebrow">Better picks</span>
-          <h2>Safer alternatives</h2>
+    <ExpandableSection
+      id="alternatives"
+      title="Better alternatives"
+      subtitle={alternatives.length ? `${alternatives.length} similar ${alternatives.length === 1 ? "product" : "products"}` : "No strong matches yet"}
+      icon={Leaf}
+      expandedSection={expandedSection}
+      setExpandedSection={setExpandedSection}
+    >
+      {alternatives.length ? (
+        <div className="alternative-list report-alternatives">
+          {alternatives.map(({ product: alternative, sharedType }) => (
+            <button key={alternative.id} onClick={() => onOpenProduct(alternative.id)}>
+              <ProductImage product={alternative} alt={alternative.name} />
+              <div>
+                <strong>{alternative.name}</strong>
+                <span>{alternative.brand}</span>
+                <small>{getAlternativeReason(product, alternative, sharedType)}</small>
+              </div>
+              <em>{getScoreLabel(alternative)}</em>
+            </button>
+          ))}
         </div>
-        <Leaf size={21} />
-      </div>
-      <div className="alternative-list">
-        {alternatives.slice(0, 3).map((alternative) => (
-          <button key={alternative.id} onClick={() => onOpenProduct(alternative.id)}>
-            <ProductImage product={alternative} alt={alternative.name} />
-            <div>
-              <strong>{alternative.name}</strong>
-              <span>{alternative.brand}</span>
-            </div>
-            <em>{getScoreLabel(alternative)}</em>
-          </button>
-        ))}
-      </div>
-    </section>
+      ) : (
+        <MissingReportData copy="No strong comparable alternatives found yet." />
+      )}
+    </ExpandableSection>
   );
 }
 
@@ -5605,19 +5830,22 @@ function EmptyState({ title, copy, compact = false }) {
 }
 
 function IngredientSheet({ ingredient, onClose }) {
+  const knownDetails = findIngredientDetails(ingredient.name);
   const fallback = {
-    risk: ingredient.risk,
-    type: ingredient.type,
-    why:
-      ingredient.risk === "safe"
-        ? "Low concern for typical use. Review the full product label if you have allergies or sensitivities."
-        : "Flagged because this ingredient may be a concern depending on amount, frequency, sensitivity, or product type.",
-    common: "Packaged products with ingredient labels",
-    alternatives: "Choose shorter formulas and products with clearer ingredient disclosure.",
+    risk: ingredient.risk || "unknown",
+    type: ingredient.type || "Purpose not available",
+    why: ingredient.risk === "unknown"
+      ? "The available reference data is not detailed enough to assign a concern level. This does not mean the ingredient is safe or harmful."
+      : ingredient.risk === "safe"
+        ? "Low concern for typical use in the available reference data. Individual allergies or sensitivities can still matter."
+        : "This ingredient may merit review depending on amount, frequency, sensitivity, and product type.",
+    common: "Products that list this ingredient on the label",
+    alternatives: "A simpler alternative depends on the ingredient's function and the product type.",
     sources: ["Ingredient reference", "Chemical reference"]
   };
-  const details = ingredientDetails[ingredient.name] || fallback;
-  const risk = riskMeta[details.risk || ingredient.risk];
+  const details = knownDetails || fallback;
+  const risk = riskMeta[details.risk || ingredient.risk] || riskMeta.unknown;
+  const use = getIngredientUse(details.type || ingredient.type);
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="ingredient-sheet" onClick={(event) => event.stopPropagation()}>
@@ -5631,12 +5859,14 @@ function IngredientSheet({ ingredient, onClose }) {
             <X size={20} />
           </button>
         </div>
-        <InfoBlock label="Type" value={details.type || ingredient.type} />
-        <InfoBlock label="Why flagged" value={details.why} />
+        <InfoBlock label="What it is" value={details.type || ingredient.type || "Reference details are not available."} />
+        <InfoBlock label="Why it is used" value={use} />
+        <InfoBlock label={risk.label === "Safe" ? "Concern summary" : "Why it may be flagged"} value={details.why} />
         <InfoBlock label="Commonly found in" value={details.common} />
-        <InfoBlock label="Better alternatives" value={details.alternatives} />
+        <InfoBlock label="Simpler alternatives" value={details.alternatives} />
+        <InfoBlock label="Evidence summary" value={knownDetails ? "Ziya applies a cautious category-specific review of the available ingredient references. Concern can depend on dose, product type, and individual sensitivity." : "Detailed evidence has not been matched for this listed ingredient yet."} />
         <div className="source-list">
-          <span>Sources</span>
+          <span>Scientific and reference sources</span>
           {details.sources?.map((source) => (
             <a
               href={sourceLinks[source] || sourceLinks["Ingredient reference"]}
@@ -5647,6 +5877,7 @@ function IngredientSheet({ ingredient, onClose }) {
               {source}
             </a>
           ))}
+          <p className="methodology-copy">Methodology: ingredient references are summarized conservatively and do not establish that a product will cause harm.</p>
         </div>
       </div>
     </div>
@@ -5670,6 +5901,20 @@ function ExpandableSection({ id, title, subtitle, icon: Icon, expandedSection, s
       {open && <div className="expand-body">{children}</div>}
     </section>
   );
+}
+
+function getIngredientUse(type = "") {
+  const value = type.toLowerCase();
+  if (/preservative/.test(value)) return "Helps protect the formula from spoilage and extend shelf life.";
+  if (/color|dye/.test(value)) return "Adds or standardizes product color.";
+  if (/flavo[u]?r/.test(value)) return "Adds or maintains flavor.";
+  if (/surfactant/.test(value)) return "Helps lift oils and dirt or create foam.";
+  if (/emulsifier|stabili[sz]er/.test(value)) return "Helps ingredients stay evenly mixed and maintains texture.";
+  if (/sweetener/.test(value)) return "Adds sweetness.";
+  if (/oil|emollient/.test(value)) return "Contributes texture, moisture, or fat.";
+  if (/protein/.test(value)) return "Contributes protein or structure to the product.";
+  if (/fiber|grain|nut|legume|botanical/.test(value)) return "Serves as a primary food, plant, or material component.";
+  return "Its exact function is not available in the current reference data.";
 }
 
 function BottomNav({ activeTab, setActiveTab }) {

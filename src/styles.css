@@ -3424,6 +3424,282 @@ button {
   padding-top: 4px;
 }
 
+/* Product reports use one quiet, predictable rhythm across every category. */
+.report-screen {
+  gap: 10px;
+  padding-bottom: calc(var(--nav-height) + 34px);
+}
+
+.report-screen .report-hero {
+  margin-bottom: 8px;
+}
+
+.report-screen .expandable {
+  flex: 0 0 auto;
+  border-radius: 18px;
+  box-shadow: 0 6px 18px rgba(33, 54, 42, 0.045);
+}
+
+.report-screen .expandable > button {
+  min-height: 66px;
+  padding: 10px 14px;
+}
+
+.report-screen .expandable-title > i {
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+}
+
+.report-screen .expandable-title strong {
+  font-size: 0.94rem;
+}
+
+.report-screen .expandable-title small {
+  max-width: min(230px, 58vw);
+  margin-top: 2px;
+  font-size: 0.73rem;
+}
+
+.report-screen .expand-body {
+  padding: 2px 14px 14px;
+}
+
+.report-row-list,
+.nutrition-row-list,
+.evaluation-summary {
+  display: grid;
+}
+
+.report-fact-row {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.report-fact-row + .report-fact-row,
+.ingredient-report-row + .ingredient-report-row,
+.nutrition-row-list > div + div,
+.evaluation-summary > div + div {
+  border-top: 1px solid rgba(223, 231, 225, 0.76);
+}
+
+.report-fact-row strong,
+.report-fact-row span,
+.ingredient-report-copy strong,
+.ingredient-report-copy small {
+  display: block;
+}
+
+.report-fact-row strong {
+  color: #263a30;
+  font-size: 0.89rem;
+}
+
+.report-fact-row div > span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.ingredient-report-row {
+  width: 100%;
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 9px;
+  align-items: center;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.ingredient-report-row:active {
+  background: #f8faf8;
+}
+
+.ingredient-report-copy {
+  min-width: 0;
+}
+
+.ingredient-report-copy strong {
+  font-size: 0.88rem;
+  line-height: 1.25;
+}
+
+.ingredient-report-copy small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.71rem;
+  line-height: 1.25;
+}
+
+.ingredient-risk-label {
+  max-width: 100px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  font-weight: 900;
+  text-align: center;
+}
+
+.risk-unknown {
+  background: #f1f4f2;
+  color: #64716a;
+}
+
+.report-missing {
+  margin: 12px 0 0;
+  padding: 12px;
+  border-radius: 12px;
+  color: #596a61;
+  background: #f6f9f7;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.nutrition-card-embedded {
+  padding: 6px 0 0;
+}
+
+.nutrition-row-list > div,
+.evaluation-summary > div {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.nutrition-row-list span,
+.evaluation-summary span {
+  color: #46574e;
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.nutrition-row-list strong,
+.evaluation-summary strong {
+  font-size: 0.84rem;
+}
+
+.evaluation-excellent,
+.evaluation-good {
+  color: #18744a;
+}
+
+.evaluation-moderate {
+  color: #936611;
+}
+
+.evaluation-poor {
+  color: #a84637;
+}
+
+.evaluation-needs-data,
+.evaluation-not-evaluated {
+  color: #68756e;
+}
+
+.methodology-note {
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.methodology-note summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: var(--green-dark);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 900;
+}
+
+.methodology-note p,
+.processing-details p,
+.processing-details small,
+.allergen-groups p,
+.methodology-copy {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.processing-details {
+  padding-top: 12px;
+}
+
+.processing-details > strong {
+  font-size: 1rem;
+}
+
+.processing-details p {
+  margin: 7px 0;
+}
+
+.processing-details ul,
+.allergen-groups ul {
+  margin: 6px 0 10px;
+  padding-left: 20px;
+  color: #35463d;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.processing-details > span,
+.processing-details > small {
+  display: block;
+  margin-top: 8px;
+}
+
+.processing-details > span {
+  color: #46574e;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.allergen-groups {
+  padding-top: 12px;
+}
+
+.allergen-groups > div + div {
+  margin-top: 12px;
+}
+
+.allergen-groups > div > strong {
+  font-size: 0.82rem;
+}
+
+.report-alternatives {
+  margin-top: 10px;
+}
+
+.report-alternatives button {
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  border-radius: 14px;
+}
+
+.report-alternatives small {
+  display: block;
+  margin-top: 5px;
+  color: #4c6257;
+  font-size: 0.69rem;
+  line-height: 1.3;
+}
+
+.source-list .methodology-copy {
+  flex-basis: 100%;
+  margin: 6px 0 0;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .sheet-title h2,
 .sheet-title p {
   margin: 0;
