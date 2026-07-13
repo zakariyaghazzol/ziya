@@ -389,6 +389,7 @@ button {
 .review-grid input,
 .nutrition-editor input,
 .nutrition-serving-field input,
+.nutrition-serving-field select,
 .manual-card textarea,
 .ocr-review-card textarea,
 .take-action textarea {
@@ -404,9 +405,19 @@ button {
 .search-box input,
 .review-grid input,
 .nutrition-editor input,
-.nutrition-serving-field input {
+.nutrition-serving-field input,
+.nutrition-serving-field select {
   height: 48px;
   padding: 0 14px;
+}
+
+.nutrition-serving-field select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fbfdfb;
+  color: var(--ink);
+  outline: none;
 }
 
 .inline-form input:focus,
@@ -414,6 +425,7 @@ button {
 .review-grid input:focus,
 .nutrition-editor input:focus,
 .nutrition-serving-field input:focus,
+.nutrition-serving-field select:focus,
 .manual-card textarea:focus,
 .ocr-review-card textarea:focus {
   border-color: rgba(47, 159, 107, 0.6);
@@ -751,6 +763,13 @@ button {
 
 .sample-details[open] summary::after {
   content: "Hide";
+}
+
+.review-validation {
+  margin: 8px 0;
+  color: #a24d3d;
+  font-size: 0.8rem;
+  font-weight: 800;
 }
 
 .sample-disclosure {
@@ -1409,6 +1428,19 @@ button {
   background: var(--green);
   font-size: 0.78rem;
   font-weight: 900;
+}
+
+.label-info-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid #d6e9dc;
+  border-radius: 999px;
+  color: #23734e;
+  background: #f2faf5;
+  font-size: 0.66rem;
+  font-weight: 850;
 }
 
 .glance-card {
@@ -2462,6 +2494,51 @@ button {
   backdrop-filter: blur(20px) saturate(1.6);
   pointer-events: auto;
   isolation: isolate;
+}
+
+.label-completion-sheet {
+  max-height: 92dvh;
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+}
+
+.label-completion-sheet .ocr-review-card {
+  margin-top: 12px;
+  border: 0;
+  box-shadow: none;
+}
+
+.label-photo-action {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+  border: 1px solid #dce9e0;
+  border-radius: 15px;
+  color: var(--green-dark);
+  background: #f4faf6;
+  font-size: 0.82rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.label-photo-action input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.label-photo-preview {
+  width: 100%;
+  height: 120px;
+  margin-top: 10px;
+  padding: 8px;
+  border-radius: 15px;
+  background: #f7f9f7;
+  object-fit: contain;
 }
 
 .knowledge-status {
