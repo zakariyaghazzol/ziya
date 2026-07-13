@@ -151,6 +151,55 @@ export function loadOverrideProductSnapshots() {
     .filter(Boolean);
 }
 
+export function loadProductOverrideRecords() {
+  return Object.values(readOverrideStore().records)
+    .filter((record) => record?.version === STORAGE_VERSION && record.source === "user-provided")
+    .map((record) => {
+      const fields = sanitizeFields(record.fields);
+      const mergedProduct = sanitizeProductSnapshot(record.mergedProduct, { omitUserPhoto: true });
+      if (!record.key || !Object.keys(fields).length || !mergedProduct) return null;
+      return {
+        version: STORAGE_VERSION,
+        key: cleanString(record.key, 240),
+        source: "user-provided",
+        productId: cleanString(record.productId, 160) || mergedProduct.id,
+        barcode: cleanString(record.barcode, 80),
+        updatedAt: Number.isFinite(Date.parse(record.updatedAt)) ? record.updatedAt : new Date(0).toISOString(),
+        fields,
+        originalProviderProduct: sanitizeProductSnapshot(record.originalProviderProduct, { omitUserPhoto: true }),
+        mergedProduct
+      };
+    })
+    .filter(Boolean);
+}
+
+export function mergeProductOverrideRecords(records) {
+  const store = readOverrideStore();
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    if (!record || record.source !== "user-provided") return;
+    const key = cleanString(record.key, 240) || getProductOverrideKey({ barcode: record.barcode, id: record.productId });
+    const fields = sanitizeFields(record.fields);
+    const mergedProduct = sanitizeProductSnapshot(record.mergedProduct, { omitUserPhoto: true });
+    if (!key || !Object.keys(fields).length || !mergedProduct) return;
+    const incomingTime = Number.isFinite(Date.parse(record.updatedAt)) ? Date.parse(record.updatedAt) : 0;
+    const currentTime = Number.isFinite(Date.parse(store.records[key]?.updatedAt)) ? Date.parse(store.records[key].updatedAt) : 0;
+    if (store.records[key] && currentTime > incomingTime) return;
+    store.records[key] = {
+      version: STORAGE_VERSION,
+      key,
+      source: "user-provided",
+      productId: cleanString(record.productId, 160) || mergedProduct.id,
+      barcode: cleanString(record.barcode, 80),
+      updatedAt: incomingTime ? new Date(incomingTime).toISOString() : new Date().toISOString(),
+      fields,
+      originalProviderProduct: sanitizeProductSnapshot(record.originalProviderProduct, { omitUserPhoto: true }),
+      mergedProduct
+    };
+  });
+  writeOverrideStore(store);
+  return loadProductOverrideRecords();
+}
+
 export function loadProductHistory() {
   const storage = getStorage();
   if (!storage) return [];
@@ -159,6 +208,16 @@ export function loadProductHistory() {
     if (parsed?.version !== STORAGE_VERSION || !Array.isArray(parsed.items)) return [];
     return parsed.items
       .filter((item) => item && typeof item.id === "string" && typeof item.productId === "string" && typeof item.date === "string")
+      .map((item) => {
+        const productSnapshot = sanitizeProductSnapshot(item.productSnapshot, { omitUserPhoto: true });
+        return {
+          id: item.id,
+          productId: item.productId,
+          date: item.date,
+          ...(Number.isFinite(Date.parse(item.scannedAt)) ? { scannedAt: item.scannedAt } : {}),
+          ...(productSnapshot ? { productSnapshot } : {})
+        };
+      })
       .slice(0, 100);
   } catch {
     return [];
@@ -169,7 +228,19 @@ export function saveProductHistory(items) {
   const storage = getStorage();
   if (!storage) return false;
   const safeItems = Array.isArray(items)
-    ? items.filter((item) => item && typeof item.id === "string" && typeof item.productId === "string" && typeof item.date === "string").slice(0, 100)
+    ? items
+        .filter((item) => item && typeof item.id === "string" && typeof item.productId === "string" && typeof item.date === "string")
+        .map((item) => {
+          const productSnapshot = sanitizeProductSnapshot(item.productSnapshot, { omitUserPhoto: true });
+          return {
+            id: item.id,
+            productId: item.productId,
+            date: item.date,
+            ...(Number.isFinite(Date.parse(item.scannedAt)) ? { scannedAt: item.scannedAt } : {}),
+            ...(productSnapshot ? { productSnapshot } : {})
+          };
+        })
+        .slice(0, 100)
     : [];
   try {
     storage.setItem(HISTORY_STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, items: safeItems }));

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import {
   applyStoredProductOverride,
+  calculateDailyTotals,
   completeProductWithUserInput,
+  createPlateEntry,
   createReportFromOcr,
   getNutritionLogProfile,
   lookupProductByBarcode,
@@ -240,6 +242,34 @@ function testLocalOverridesAndHistory() {
   assert(window.localStorage.getItem(PRODUCT_OVERRIDE_STORAGE_KEYS.history));
 }
 
+function testTodayPlateRegression() {
+  const product = {
+    id: "plate-food",
+    name: "Plate test food",
+    brand: "Example",
+    category: "food",
+    nutrition: {
+      basis: "serving",
+      servingSize: "30 g",
+      calories: 140,
+      protein: 4,
+      carbs: 20,
+      fat: 5,
+      fiber: null,
+      sugar: 3,
+      sodium: 220
+    }
+  };
+  const entry = createPlateEntry(product, 1.5, "servings");
+  assert.equal(entry.contribution.calories, 210);
+  assert.equal(entry.contribution.protein, 6);
+  assert.equal(entry.contribution.fiber, null);
+  const totals = calculateDailyTotals([entry]);
+  assert.equal(totals.calories.total, 210);
+  assert.equal(totals.fiber.total, 0);
+  assert.equal(totals.fiber.missingCount, 1);
+}
+
 async function testBarcodeRegression() {
   window.localStorage.clear();
   const unknown = await lookupProductByBarcode("0000000000000");
@@ -256,6 +286,7 @@ async function run() {
   testProviderParsingAndKnowledge();
   testRawReviewAndNutrition();
   testLocalOverridesAndHistory();
+  testTodayPlateRegression();
   await testBarcodeRegression();
   console.log("Data-quality checks passed.");
 }

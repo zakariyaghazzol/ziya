@@ -15,6 +15,26 @@ import {
   saveProductHistory,
   saveProductOverride
 } from "./data/productOverrides";
+import { syncZiyaData } from "./data/cloudSync";
+import {
+  COMMON_ALLERGIES,
+  DIET_PREFERENCES,
+  PROFILE_LANGUAGES,
+  PROFILE_UNITS,
+  loadLocalProfile,
+  normalizeAllergyPreference,
+  normalizeIngredientPreference,
+  saveLocalProfile,
+  touchProfile
+} from "./profile/profileStore";
+import { getPersonalAlerts } from "./profile/personalAlerts";
+import {
+  isSupabaseConfigured,
+  sendMagicLink,
+  signInWithGoogle,
+  signOutOfSupabase,
+  supabase
+} from "./lib/supabaseClient";
 import {
   AlertTriangle,
   Apple,
@@ -28,15 +48,20 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Cloud,
+  CloudOff,
   Copy,
   Droplets,
-  Dumbbell,
   Flashlight,
   FlaskConical,
   HeartPulse,
   Home,
   Info,
   Leaf,
+  Languages,
+  LogIn,
+  LogOut,
+  Mail,
   Minus,
   Pencil,
   Pill,
@@ -52,7 +77,8 @@ import {
   Utensils,
   Volume2,
   X,
-  Zap
+  Zap,
+  RefreshCw
 } from "lucide-react";
 import "./styles.css";
 
@@ -2523,7 +2549,7 @@ function sanitizePlateEntry(entry) {
 }
 
 function loadPlateState() {
-  const empty = { goals: null, days: {} };
+  const empty = { goals: null, days: {}, updatedAt: null };
   if (typeof window === "undefined") return empty;
   try {
     const parsed = JSON.parse(window.localStorage.getItem(PLATE_STORAGE_KEY) || "null");
@@ -2536,7 +2562,11 @@ function loadPlateState() {
         entries: asArray(day.entries).map(sanitizePlateEntry).filter(Boolean)
       };
     });
-    return { goals: sanitizePlateGoals(parsed.goals), days };
+    return {
+      goals: sanitizePlateGoals(parsed.goals),
+      days,
+      updatedAt: Number.isFinite(Date.parse(parsed.updatedAt)) ? parsed.updatedAt : null
+    };
   } catch {
     return empty;
   }
@@ -2615,7 +2645,8 @@ function createPlateEntry(product, amount, mode) {
     amount,
     mode,
     contribution,
-    addedAt: new Date().toISOString()
+    addedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
   };
 }
 
@@ -2633,7 +2664,7 @@ function updatePlateEntryInState(state, dateKey, entryId, amount) {
           if (entry.id !== entryId) return entry;
           const product = { ...entry.product, nutrition: entry.nutritionBase };
           const contribution = normalizeNutritionForServing(product, numericAmount, entry.mode);
-          return contribution ? { ...entry, amount: numericAmount, contribution } : entry;
+          return contribution ? { ...entry, amount: numericAmount, contribution, updatedAt: new Date().toISOString() } : entry;
         })
       }
     }
@@ -2660,10 +2691,38 @@ function splitLabelText(text) {
     .filter(Boolean);
 }
 
+const SYNC_CONSENT_PREFIX = "ziya-sync-consent-v1:";
+
+function getSyncConsent(userId) {
+  if (!userId || typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(`${SYNC_CONSENT_PREFIX}${userId}`);
+  } catch {
+    return null;
+  }
+}
+
+function setSyncConsent(userId, value) {
+  if (!userId || typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(`${SYNC_CONSENT_PREFIX}${userId}`, value);
+  } catch {
+    // Consent remains session-only when storage is unavailable.
+  }
+}
+
+function loadPersistedProductSnapshots() {
+  const snapshots = [
+    ...loadOverrideProductSnapshots(),
+    ...loadProductHistory().map((item) => item.productSnapshot).filter(Boolean)
+  ];
+  return [...new Map(snapshots.map((product) => [product.id, product])).values()];
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState("scan");
   const [selectedProductId, setSelectedProductId] = useState("pop-secret");
-  const [dynamicProducts, setDynamicProducts] = useState(loadOverrideProductSnapshots);
+  const [dynamicProducts, setDynamicProducts] = useState(loadPersistedProductSnapshots);
   const [scanHistory, setScanHistory] = useState(loadProductHistory);
   const [barcode, setBarcode] = useState("");
   const [barcodeMiss, setBarcodeMiss] = useState(false);
@@ -2687,6 +2746,13 @@ function App() {
   const [messageTone, setMessageTone] = useState("Polite");
   const [platform, setPlatform] = useState("Instagram");
   const [copied, setCopied] = useState(false);
+  const [personalProfile, setPersonalProfile] = useState(loadLocalProfile);
+  const [authSession, setAuthSession] = useState(null);
+  const [authReady, setAuthReady] = useState(!isSupabaseConfigured);
+  const [authMessage, setAuthMessage] = useState("");
+  const [syncStatus, setSyncStatus] = useState("Local only");
+  const [syncConsentPending, setSyncConsentPending] = useState(false);
+  const syncRunUserRef = useRef("");
 
   const productIndex = useMemo(() => {
     const map = new Map(products.map((product) => [product.id, product]));
@@ -2716,6 +2782,60 @@ function App() {
   useEffect(() => {
     saveProductHistory(scanHistory);
   }, [scanHistory]);
+
+  useEffect(() => {
+    saveLocalProfile(personalProfile);
+  }, [personalProfile]);
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthReady(true);
+      setSyncStatus("Local only");
+      return undefined;
+    }
+    let mounted = true;
+    supabase.auth.getSession()
+      .then(({ data, error }) => {
+        if (!mounted) return;
+        setAuthSession(data?.session || null);
+        setAuthReady(true);
+        if (error) setAuthMessage("Sign-in status is unavailable right now.");
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setAuthReady(true);
+        setAuthMessage("Sign-in status is unavailable right now. Local mode is still ready.");
+      });
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+      setAuthSession(session || null);
+      setAuthReady(true);
+      if (event === "SIGNED_OUT") {
+        syncRunUserRef.current = "";
+        setSyncConsentPending(false);
+        setSyncStatus("Local only");
+      }
+    });
+    return () => {
+      mounted = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const userId = authSession?.user?.id;
+    if (!userId) return;
+    const consent = getSyncConsent(userId);
+    if (consent === "accepted" && syncRunUserRef.current !== userId) {
+      syncRunUserRef.current = userId;
+      void performCloudSync();
+    } else if (!consent) {
+      setSyncConsentPending(true);
+      setSyncStatus("Sync paused");
+    } else {
+      setSyncStatus("Sync paused");
+    }
+  }, [authSession?.user?.id]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -2756,11 +2876,105 @@ function App() {
     });
   }
 
+  function updatePersonalProfile(update) {
+    setPersonalProfile((current) => {
+      const next = typeof update === "function" ? update(current) : { ...current, ...update };
+      return touchProfile(next);
+    });
+    if (authSession?.user) setSyncStatus("Sync paused");
+  }
+
+  async function requestMagicLink(email) {
+    const normalizedEmail = cleanText(email).toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
+      setAuthMessage("Enter a valid email address.");
+      return false;
+    }
+    setAuthMessage("Sending sign-in link…");
+    let error;
+    try {
+      ({ error } = await sendMagicLink(normalizedEmail));
+    } catch (requestError) {
+      error = requestError;
+    }
+    if (error) {
+      setAuthMessage("We couldn’t send the sign-in link. Try again shortly.");
+      return false;
+    }
+    setAuthMessage("Check your email for a secure sign-in link.");
+    return true;
+  }
+
+  async function requestGoogleSignIn() {
+    setAuthMessage("Opening Google sign-in…");
+    let error;
+    try {
+      ({ error } = await signInWithGoogle());
+    } catch (requestError) {
+      error = requestError;
+    }
+    if (error) setAuthMessage("Google sign-in is unavailable right now.");
+  }
+
+  async function signOutAccount() {
+    let error;
+    try {
+      ({ error } = await signOutOfSupabase());
+    } catch (requestError) {
+      error = requestError;
+    }
+    if (error) {
+      setAuthMessage("Sign-out failed. Try again.");
+      return;
+    }
+    setAuthMessage("Signed out. Your local data is still here.");
+  }
+
+  async function performCloudSync() {
+    if (!supabase || !authSession?.user) {
+      setSyncStatus("Local only");
+      return false;
+    }
+    setSyncStatus("Syncing");
+    setAuthMessage("");
+    try {
+      const result = await syncZiyaData({
+        client: supabase,
+        user: authSession.user,
+        profile: personalProfile,
+        plateState,
+        history: scanHistory,
+        productIndex
+      });
+      setPersonalProfile(result.profile);
+      setPlateState(result.plateState);
+      setScanHistory(result.history);
+      upsertDynamicProducts(result.products);
+      setSyncStatus("Synced");
+      setSyncConsentPending(false);
+      setSyncConsent(authSession.user.id, "accepted");
+      return true;
+    } catch (error) {
+      if (import.meta.env.DEV) console.error("Ziya sync failed", error);
+      setSyncStatus("Sync failed");
+      setAuthMessage("Cloud sync is unavailable. Your local data is unchanged.");
+      return false;
+    }
+  }
+
+  function pauseCloudSync() {
+    if (authSession?.user?.id) setSyncConsent(authSession.user.id, "declined");
+    setSyncConsentPending(false);
+    setSyncStatus("Sync paused");
+  }
+
   function recordHistoryProduct(product) {
+    if (authSession?.user) setSyncStatus("Sync paused");
     setScanHistory((items) => {
       if (items[0]?.productId === product.id && items[0]?.date === "Today, just now") return items;
+      const scannedAt = new Date().toISOString();
       return [
-        { id: `h-${product.id}-${Date.now()}`, productId: product.id, date: "Today, just now" },
+        { id: `h-${product.id}-${Date.now()}`, productId: product.id, date: "Today, just now", scannedAt, productSnapshot: product },
         ...items.filter((item) => item.productId !== product.id)
       ];
     });
@@ -2904,7 +3118,9 @@ function App() {
     const validated = sanitizePlateGoals(goals);
     if (!validated) return false;
     const key = getLocalDateKey();
+    const updatedAt = new Date().toISOString();
     setPlateState((current) => ({
+      ...current,
       goals: validated,
       days: {
         ...current.days,
@@ -2912,14 +3128,17 @@ function App() {
           goalsSnapshot: validated,
           entries: current.days[key]?.entries || []
         }
-      }
+      },
+      updatedAt
     }));
+    updatePersonalProfile((current) => ({ ...current, todayPlateGoals: validated }));
     return true;
   }
 
   function addPlateServing(product, amount, mode) {
     const entry = createPlateEntry(product, amount, mode);
     if (!entry) return false;
+    if (authSession?.user) setSyncStatus("Sync paused");
     const key = getLocalDateKey();
     setPlateState((current) => ({
       ...current,
@@ -2929,18 +3148,27 @@ function App() {
           goalsSnapshot: current.days[key]?.goalsSnapshot || current.goals || { ...PLATE_DEFAULT_GOALS },
           entries: [entry, ...(current.days[key]?.entries || [])]
         }
-      }
+      },
+      updatedAt: new Date().toISOString()
     }));
     setServingProduct(null);
     return true;
   }
 
   function updatePlateEntry(dateKey, entryId, amount) {
-    setPlateState((current) => updatePlateEntryInState(current, dateKey, entryId, amount));
+    if (authSession?.user) setSyncStatus("Sync paused");
+    setPlateState((current) => ({
+      ...updatePlateEntryInState(current, dateKey, entryId, amount),
+      updatedAt: new Date().toISOString()
+    }));
   }
 
   function removePlateEntry(dateKey, entryId) {
-    setPlateState((current) => removePlateEntryFromState(current, dateKey, entryId));
+    if (authSession?.user) setSyncStatus("Sync paused");
+    setPlateState((current) => ({
+      ...removePlateEntryFromState(current, dateKey, entryId),
+      updatedAt: new Date().toISOString()
+    }));
     setPlateEntryTarget(null);
   }
 
@@ -2974,10 +3202,33 @@ function App() {
       return <RecommendationsScreen productIndex={productIndex} history={scanHistory} onOpenProduct={openProduct} />;
     }
     if (activeTab === "top") {
-      return <TopScreen productIndex={productIndex} realProducts={realProducts} onOpenProduct={openProduct} />;
+      return <TopScreen productIndex={productIndex} realProducts={realProducts} onOpenProduct={openProduct} onOpenProfile={() => setActiveTab("profile")} />;
     }
     if (activeTab === "profile") {
-      return <ProfileScreen dailyTotals={dailyTotals} dailyLog={dailyLog} goals={plateState.goals} />;
+      return (
+        <ProfileScreen
+          profile={personalProfile}
+          onChange={updatePersonalProfile}
+          onBack={() => setActiveTab("top")}
+          dailyTotals={dailyTotals}
+          dailyLog={dailyLog}
+          goals={plateState.goals}
+          onSaveGoals={savePlateGoals}
+          account={{
+            configured: isSupabaseConfigured,
+            ready: authReady,
+            session: authSession,
+            message: authMessage,
+            syncStatus,
+            syncConsentPending,
+            onMagicLink: requestMagicLink,
+            onGoogle: requestGoogleSignIn,
+            onSignOut: signOutAccount,
+            onSync: performCloudSync,
+            onPauseSync: pauseCloudSync
+          }}
+        />
+      );
     }
     if (activeTab === "report") {
       return (
@@ -3000,6 +3251,7 @@ function App() {
           copied={copied}
           setCopied={setCopied}
           onCompleteLabel={openLabelCompletion}
+          personalProfile={personalProfile}
         />
       );
     }
@@ -3041,6 +3293,7 @@ function App() {
         setCopied={setCopied}
         setManualProduct={upsertDynamicProduct}
         onRecordHistory={recordHistoryProduct}
+        personalProfile={personalProfile}
       />
     );
   }
@@ -3115,7 +3368,8 @@ function ScanScreen({
   copied,
   setCopied,
   setManualProduct,
-  onRecordHistory
+  onRecordHistory,
+  personalProfile
 }) {
   const [cameraStatus, setCameraStatus] = useState("requesting");
   const [cameraMessage, setCameraMessage] = useState("");
@@ -4602,6 +4856,7 @@ function ScanScreen({
         applyOcrReview={applyOcrInSheet}
         finishProductPhoto={finishProductPhoto}
         useSampleProduct={useSampleProduct}
+        personalProfile={personalProfile}
       />
     </div>
   );
@@ -4686,7 +4941,8 @@ function ScannerBottomSheet({
   setOcrReview,
   applyOcrReview,
   finishProductPhoto,
-  useSampleProduct
+  useSampleProduct,
+  personalProfile
 }) {
   if (!mode) return null;
   const isProduct = mode === "product" && product;
@@ -4752,6 +5008,7 @@ function ScannerBottomSheet({
             copied={copied}
             setCopied={setCopied}
             onCompleteLabel={openFallback}
+            personalProfile={personalProfile}
           />
         </div>
       )}
@@ -5343,7 +5600,7 @@ function SearchScreen({ query, setQuery, results, status, lastSearchTerm, onSear
   );
 }
 
-function TopScreen({ productIndex, realProducts, onOpenProduct }) {
+function TopScreen({ productIndex, realProducts, onOpenProduct, onOpenProfile }) {
   const [selectedCategory, setSelectedCategory] = useState("all");
   const shownProducts = featuredSampleIds
     .map((id) => productIndex.get(id))
@@ -5363,7 +5620,15 @@ function TopScreen({ productIndex, realProducts, onOpenProduct }) {
   ];
   return (
     <div className="stack">
-      <Header eyebrow="Top" title="Popular picks" />
+      <Header
+        eyebrow="Top"
+        title="Popular picks"
+        action={(
+          <button className="header-icon-button" onClick={onOpenProfile} aria-label="Open profile">
+            <User size={21} />
+          </button>
+        )}
+      />
       <div className="filter-tabs" role="group" aria-label="Product category">
         {categoryFilters.map(([value, label]) => (
           <button key={value} className={selectedCategory === value ? "active" : ""} onClick={() => setSelectedCategory(value)}>
@@ -5543,6 +5808,43 @@ function LabelCompletionPanel({ product, onCompleteLabel }) {
   );
 }
 
+function PersonalAlerts({ alerts }) {
+  if (!alerts?.length) return null;
+  const alertIcons = {
+    allergy: AlertTriangle,
+    avoid: Minus,
+    preference: ShieldCheck,
+    watchlist: Bell,
+    data: Info
+  };
+  return (
+    <section className="card personal-alerts-card" aria-labelledby="personal-alerts-title">
+      <div className="personal-alerts-heading">
+        <div>
+          <span className="eyebrow">For you</span>
+          <h2 id="personal-alerts-title">Personal alerts</h2>
+        </div>
+        <span>{alerts.length}</span>
+      </div>
+      <div className="personal-alert-list">
+        {alerts.map((alert) => {
+          const AlertIcon = alertIcons[alert.kind] || Info;
+          return (
+            <div className={`personal-alert-row personal-alert-${alert.kind}`} key={`${alert.kind}-${alert.title}`}>
+              <i><AlertIcon size={17} /></i>
+              <div>
+                <span>{alert.label}</span>
+                <strong>{alert.title}</strong>
+                <small>{alert.message}</small>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function ReportScreen({
   product,
   productIndex,
@@ -5561,7 +5863,8 @@ function ReportScreen({
   setMessageTone,
   copied,
   setCopied,
-  onCompleteLabel
+  onCompleteLabel,
+  personalProfile
 }) {
   const meta = categoryMeta[product.category];
   const Icon = meta.icon;
@@ -5582,6 +5885,10 @@ function ReportScreen({
   const ingredientSubtitle = ingredients.length
     ? `${ingredients.length} ingredients · ${counts.moderate + counts.harmful} flagged${counts.unknown ? ` · ${counts.unknown} need review` : ""}`
     : "Needs label";
+  const personalAlerts = useMemo(
+    () => getPersonalAlerts(product, personalProfile),
+    [product, personalProfile]
+  );
 
   return (
     <div className="stack report-screen">
@@ -5610,6 +5917,8 @@ function ReportScreen({
           </div>
         </div>
       </section>
+
+      <PersonalAlerts alerts={personalAlerts} />
 
       {product.category === "food" && (
         <PlateReportAction
@@ -6629,67 +6938,283 @@ function HistoryGroup({ title, items, productIndex, onOpenProduct }) {
   );
 }
 
-function ProfileScreen({ dailyTotals, dailyLog, goals }) {
-  const calorieGoal = goals?.calories;
-  const remaining = hasNumber(calorieGoal) ? calorieGoal - dailyTotals.calories : null;
+function ProfileScreen({ profile, onChange, onBack, dailyTotals, dailyLog, goals, onSaveGoals, account }) {
+  const [customAllergy, setCustomAllergy] = useState("");
+  const [editingGoals, setEditingGoals] = useState(false);
+
+  function toggleAllergy(item) {
+    const normalized = normalizeAllergyPreference(item);
+    if (!normalized) return;
+    onChange((current) => {
+      const exists = current.allergies.some((entry) => entry.key === normalized.key);
+      return {
+        ...current,
+        allergies: exists
+          ? current.allergies.filter((entry) => entry.key !== normalized.key)
+          : [...current.allergies, normalized]
+      };
+    });
+  }
+
+  function addCustomAllergy(event) {
+    event.preventDefault();
+    const normalized = normalizeAllergyPreference(customAllergy);
+    if (!normalized) return;
+    onChange((current) => ({
+      ...current,
+      allergies: [...current.allergies.filter((entry) => entry.key !== normalized.key), normalized]
+    }));
+    setCustomAllergy("");
+  }
+
+  function toggleDietPreference(key) {
+    onChange((current) => ({
+      ...current,
+      dietPreferences: current.dietPreferences.includes(key)
+        ? current.dietPreferences.filter((item) => item !== key)
+        : [...current.dietPreferences, key]
+    }));
+  }
+
+  function updateIngredientList(field, value, remove = false) {
+    const normalized = normalizeIngredientPreference(value);
+    if (!normalized) return;
+    onChange((current) => ({
+      ...current,
+      [field]: remove
+        ? current[field].filter((item) => item.key !== normalized.key)
+        : [...current[field].filter((item) => item.key !== normalized.key), normalized]
+    }));
+  }
+
+  const selectedCommonAllergies = new Set(profile.allergies.map((item) => item.key));
+  const customAllergies = profile.allergies.filter((item) => !COMMON_ALLERGIES.some((common) => common.key === item.key));
+  const effectiveGoals = goals || profile.todayPlateGoals;
+  const calorieGoal = effectiveGoals?.calories;
+
   return (
-    <div className="stack">
-      <Header eyebrow="Profile" title="Profile" />
-      <section className="card profile-card">
-        <div className="profile-top">
-          <div className="avatar">
-            <User size={28} />
-          </div>
-          <div>
-            <h2>Guest scanner</h2>
-            <p>Guest mode</p>
-          </div>
+    <div className="stack profile-screen">
+      <Header
+        eyebrow="Profile"
+        title="Your Ziya"
+        action={(
+          <button className="header-icon-button" onClick={onBack} aria-label="Back to Top">
+            <ChevronLeft size={22} />
+          </button>
+        )}
+      />
+
+      <AccountProfileCard account={account} />
+
+      <section className="card profile-section-card">
+        <div className="profile-section-heading">
+          <span><AlertTriangle size={18} /></span>
+          <div><h2>Allergies</h2><p>Products with a clear match get a high-priority personal alert.</p></div>
         </div>
-        <div className="settings-list">
-          <ProfileRow icon={Target} label="Daily calorie goal" value={hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Set in Today’s Plate"} />
-          <ProfileRow icon={Bell} label="Saved preferences" value="Low sodium, fragrance-free" />
-          <ProfileRow icon={AlertTriangle} label="Allergies or sensitivities" value="Milk, peanuts, fragrance" />
-          <ProfileRow icon={Minus} label="Avoided ingredients" value="Red 40, artificial flavor" />
-          <ProfileRow icon={Star} label="Premium status" value="Not required to scan" />
-        </div>
-      </section>
-      <section className="card">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">Food only</span>
-            <h2>Today’s Plate</h2>
-          </div>
-          <Dumbbell size={21} />
-        </div>
-        <div className="daily-log profile-log">
-          <div className="daily-ring">
-            <Target size={24} />
-            <strong>{hasNumber(remaining) ? Math.abs(Math.round(remaining)).toLocaleString() : "—"}</strong>
-            <span>{hasNumber(remaining) ? (remaining >= 0 ? "left" : "over") : "set goals"}</span>
-          </div>
-          <div className="daily-copy">
-            <div className="calorie-line">
-              <span>Goal</span>
-              <strong>{hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Not set"}</strong>
-            </div>
-            <div className="calorie-line">
-              <span>Eaten</span>
-              <strong>{Math.round(dailyTotals.calories).toLocaleString()} kcal</strong>
-            </div>
-            <small>
-              Protein {formatNutrientValue(dailyTotals.protein, "protein")}g · Carbs {formatNutrientValue(dailyTotals.carbs, "carbs")}g · Fat {formatNutrientValue(dailyTotals.fat, "fat")}g
-            </small>
-          </div>
-        </div>
-        <div className="today-foods">
-          {dailyLog.slice(0, 4).map((food) => (
-            <div key={food.id}>
-              <span>{food.product.name}</span>
-              <strong>{formatNutrientValue(food.contribution.calories, "calories")} kcal</strong>
-            </div>
+        <div className="profile-choice-grid" role="group" aria-label="Common allergies">
+          {COMMON_ALLERGIES.map((item) => (
+            <button
+              key={item.key}
+              className={selectedCommonAllergies.has(item.key) ? "selected" : ""}
+              aria-pressed={selectedCommonAllergies.has(item.key)}
+              onClick={() => toggleAllergy(item)}
+            >
+              {selectedCommonAllergies.has(item.key) && <Check size={15} />}
+              {item.label}
+            </button>
           ))}
         </div>
+        {customAllergies.length > 0 && (
+          <div className="profile-tag-list" aria-label="Custom allergies">
+            {customAllergies.map((item) => (
+              <button key={item.key} onClick={() => toggleAllergy(item)} aria-label={`Remove ${item.label}`}>
+                {item.label}<X size={14} />
+              </button>
+            ))}
+          </div>
+        )}
+        <form className="profile-add-form" onSubmit={addCustomAllergy}>
+          <input value={customAllergy} onChange={(event) => setCustomAllergy(event.target.value)} placeholder="Add another allergy" maxLength={80} aria-label="Custom allergy" />
+          <button type="submit" aria-label="Add allergy"><Plus size={18} /></button>
+        </form>
       </section>
+
+      <section className="card profile-section-card">
+        <div className="profile-section-heading">
+          <span><Leaf size={18} /></span>
+          <div><h2>Diet preferences</h2><p>Ziya checks clear conflicts and stays cautious when labels are incomplete.</p></div>
+        </div>
+        <div className="profile-choice-grid" role="group" aria-label="Diet preferences">
+          {DIET_PREFERENCES.map((item) => {
+            const selected = profile.dietPreferences.includes(item.key);
+            return (
+              <button key={item.key} className={selected ? "selected" : ""} aria-pressed={selected} onClick={() => toggleDietPreference(item.key)}>
+                {selected && <Check size={15} />}{item.label}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="card profile-section-card">
+        <div className="profile-section-heading">
+          <span><Bell size={18} /></span>
+          <div><h2>Ingredient alerts</h2><p>Aliases and E-numbers are matched through Ziya's ingredient knowledge.</p></div>
+        </div>
+        <ProfileIngredientEditor
+          title="Avoided ingredients"
+          copy="Shown as a personal avoid-list alert."
+          items={profile.avoidedIngredients}
+          placeholder="Try Red 40 or E129"
+          onAdd={(value) => updateIngredientList("avoidedIngredients", value)}
+          onRemove={(value) => updateIngredientList("avoidedIngredients", value, true)}
+        />
+        <ProfileIngredientEditor
+          title="Watchlist"
+          copy="Shown as information, not a danger warning."
+          items={profile.watchlistIngredients}
+          placeholder="Try carrageenan"
+          onAdd={(value) => updateIngredientList("watchlistIngredients", value)}
+          onRemove={(value) => updateIngredientList("watchlistIngredients", value, true)}
+        />
+      </section>
+
+      <section className="card profile-section-card">
+        <div className="profile-section-heading">
+          <span><Languages size={18} /></span>
+          <div><h2>App preferences</h2><p>Analysis remains in English for now; language is saved for future localization.</p></div>
+        </div>
+        <div className="profile-select-grid">
+          <label>
+            <span>Language</span>
+            <select value={profile.preferredLanguage} onChange={(event) => onChange({ preferredLanguage: event.target.value })}>
+              {PROFILE_LANGUAGES.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Units</span>
+            <select value={profile.unitSystem} onChange={(event) => onChange({ unitSystem: event.target.value })}>
+              {PROFILE_UNITS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section className="card profile-section-card profile-goals-card">
+        <div className="profile-section-heading">
+          <span><Target size={18} /></span>
+          <div><h2>Today's Plate goals</h2><p>These are your editable targets, not medical recommendations.</p></div>
+        </div>
+        <div className="profile-goal-summary">
+          <span><small>Calories</small><strong>{hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Not set"}</strong></span>
+          <span><small>Eaten today</small><strong>{Math.round(dailyTotals.calories).toLocaleString()} kcal</strong></span>
+          <span><small>Foods today</small><strong>{dailyLog.length}</strong></span>
+        </div>
+        <button className="profile-edit-goals" onClick={() => setEditingGoals((current) => !current)}>
+          <Pencil size={17} />{editingGoals ? "Close goal editor" : "Edit goals"}<ChevronRight size={17} />
+        </button>
+      </section>
+
+      {editingGoals && (
+        <GoalSetupCard
+          initialGoals={effectiveGoals || PLATE_DEFAULT_GOALS}
+          onCancel={() => setEditingGoals(false)}
+          onSave={(nextGoals) => {
+            if (onSaveGoals(nextGoals)) setEditingGoals(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AccountProfileCard({ account }) {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const signedIn = Boolean(account.session?.user);
+
+  async function submitMagicLink(event) {
+    event.preventDefault();
+    setSending(true);
+    try {
+      await account.onMagicLink(email);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <section className="card profile-section-card account-profile-card">
+      <div className="profile-section-heading">
+        <span>{signedIn ? <Cloud size={18} /> : <User size={18} />}</span>
+        <div>
+          <h2>{signedIn ? "Signed in" : "Local profile"}</h2>
+          <p>{signedIn ? account.session.user.email || "Your Ziya account" : "Continue without an account. Your profile stays on this device."}</p>
+        </div>
+        <em className={`sync-status sync-status-${account.syncStatus.toLowerCase().replace(/\s+/g, "-")}`}>
+          {account.syncStatus === "Synced" ? <Cloud size={14} /> : <CloudOff size={14} />}{account.syncStatus}
+        </em>
+      </div>
+
+      {!account.ready ? (
+        <div className="account-quiet-state"><RefreshCw size={17} />Checking account...</div>
+      ) : !account.configured ? (
+        <div className="account-quiet-state"><Check size={17} />Local profile is ready. Account sync can be enabled later.</div>
+      ) : signedIn ? (
+        <div className="account-actions-stack">
+          {account.syncConsentPending && (
+            <div className="sync-consent-card">
+              <strong>Sync your local data to this account?</strong>
+              <span>Ziya will merge your profile, food log, history, and label corrections without deleting local data.</span>
+              <div><button className="secondary-button" onClick={account.onPauseSync}>Not now</button><button className="primary-button" onClick={account.onSync}>Sync now</button></div>
+            </div>
+          )}
+          {!account.syncConsentPending && (
+            <button className="secondary-button" onClick={account.onSync} disabled={account.syncStatus === "Syncing"}>
+              <RefreshCw size={17} />{account.syncStatus === "Syncing" ? "Syncing..." : "Sync now"}
+            </button>
+          )}
+          <button className="profile-sign-out" onClick={account.onSignOut}><LogOut size={17} />Sign out</button>
+        </div>
+      ) : (
+        <div className="account-sign-in">
+          <div><span className="eyebrow">Optional</span><strong>Sign in to sync your data</strong><p>Scanning, reports, and Today's Plate keep working without an account.</p></div>
+          <form onSubmit={submitMagicLink}>
+            <label htmlFor="profile-email">Email</label>
+            <div><Mail size={18} /><input id="profile-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required /><button type="submit" disabled={sending}>{sending ? "Sending" : "Send link"}</button></div>
+          </form>
+          <button className="secondary-button account-google-button" onClick={account.onGoogle}><LogIn size={17} />Continue with Google</button>
+        </div>
+      )}
+      {account.message && <p className="account-message" role="status">{account.message}</p>}
+    </section>
+  );
+}
+
+function ProfileIngredientEditor({ title, copy, items, placeholder, onAdd, onRemove }) {
+  const [value, setValue] = useState("");
+
+  function submit(event) {
+    event.preventDefault();
+    if (!value.trim()) return;
+    onAdd(value);
+    setValue("");
+  }
+
+  return (
+    <div className="profile-ingredient-editor">
+      <div><strong>{title}</strong><small>{copy}</small></div>
+      {items.length > 0 && (
+        <div className="profile-tag-list">
+          {items.map((item) => (
+            <button key={item.key} onClick={() => onRemove(item)} aria-label={`Remove ${item.label}`}>{item.label}<X size={14} /></button>
+          ))}
+        </div>
+      )}
+      <form className="profile-add-form" onSubmit={submit}>
+        <input value={value} onChange={(event) => setValue(event.target.value)} placeholder={placeholder} maxLength={100} aria-label={`Add to ${title.toLowerCase()}`} />
+        <button type="submit" aria-label={`Add to ${title.toLowerCase()}`}><Plus size={18} /></button>
+      </form>
     </div>
   );
 }
@@ -6970,7 +7495,9 @@ function BottomNav({ activeTab, setActiveTab }) {
     <nav className="bottom-nav">
       {tabs.map((tab) => {
         const Icon = tab.icon;
-        const active = activeTab === tab.id || (tab.id === "scan" && activeTab === "report");
+        const active = activeTab === tab.id
+          || (tab.id === "scan" && activeTab === "report")
+          || (tab.id === "top" && activeTab === "profile");
         return (
           <button
             key={tab.id}
@@ -6989,12 +7516,15 @@ function BottomNav({ activeTab, setActiveTab }) {
   );
 }
 
-function Header({ eyebrow, title, subtitle }) {
+function Header({ eyebrow, title, subtitle, action }) {
   return (
-    <header className="page-header">
-      <span className="eyebrow">{eyebrow}</span>
-      <h1>{title}</h1>
-      {subtitle && <p>{subtitle}</p>}
+    <header className={`page-header ${action ? "has-action" : ""}`}>
+      <div className="page-header-copy">
+        <span className="eyebrow">{eyebrow}</span>
+        <h1>{title}</h1>
+        {subtitle && <p>{subtitle}</p>}
+      </div>
+      {action}
     </header>
   );
 }
@@ -7030,16 +7560,6 @@ function Macro({ label, value, unit }) {
     <div className={`macro ${isMissing ? "missing" : ""}`}>
       <span>{label}</span>
       <strong>{isMissing ? "Missing" : `${value}${unit}`}</strong>
-    </div>
-  );
-}
-
-function ProfileRow({ icon: Icon, label, value }) {
-  return (
-    <div className="profile-row">
-      <Icon size={18} />
-      <span>{label}</span>
-      <strong>{value}</strong>
     </div>
   );
 }
