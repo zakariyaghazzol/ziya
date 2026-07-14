@@ -23,9 +23,12 @@ If either value is absent or still a placeholder, Ziya automatically stays in lo
 
 ## 3. Create private user tables
 
-Open the Supabase SQL Editor, review, and run `supabase/migrations/202607130001_profile_sync.sql`.
+Open the Supabase SQL Editor, review, and run these migrations in order:
 
-The migration creates the profile, preference, Today's Plate, scan-history, and product-override tables. It enables Row Level Security and adds policies that require `auth.uid()` to match the row owner. No table grants anonymous users access.
+1. `supabase/migrations/202607130001_profile_sync.sql`
+2. `supabase/migrations/202607140001_regional_product_preferences.sql`
+
+The first migration creates the profile, preference, Today's Plate, scan-history, and product-override tables. It enables Row Level Security and adds policies that require `auth.uid()` to match the row owner. The second adds product-region and ingredient-display preferences to the existing private profile row. No table grants anonymous users access.
 
 ## 4. Configure authentication
 

@@ -3,6 +3,7 @@ import { findCommonIngredient } from "../data/commonIngredientAtlas";
 import { findVagueIngredientTerm } from "../data/vagueIngredientTerms";
 import { resolveLocalIngredientKnowledge } from "../knowledge/ingredientKnowledge";
 import { normalizeIngredientName } from "./ingredientParser";
+import { canonicalizeIngredientLanguage } from "./ingredientLanguageNormalizer";
 import { createIngredientProvenance, INGREDIENT_PROVENANCE, mergeIngredientProvenance } from "./ingredientProvenance";
 import { createUnknownIngredientReview, getUnknownIngredientMessage } from "./ingredientUnknowns";
 
@@ -29,6 +30,10 @@ const PROCESSING_MARKERS = [
 
 function titleCase(value) {
   return String(value || "").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatAllergenSource(source) {
+  return source === "tree nuts" ? "Tree nut" : titleCase(source);
 }
 
 function toRisk(concernLevel) {
@@ -92,8 +97,9 @@ function getNodeProvenance(node) {
 
 function commonStatus(record, allergens, processingMarkers) {
   if (processingMarkers.length) return "Processing marker";
-  if (allergens.length) return `${titleCase(allergens[0])} source`;
+  if (allergens.length) return `${formatAllergenSource(allergens[0])} source`;
   if (record.tags.includes("sodium-source")) return "Sodium source";
+  if (record.tags.includes("common-flavoring")) return "Common flavoring";
   return "Common ingredient";
 }
 
@@ -148,6 +154,7 @@ function buildCommon(record, inputName, node, options) {
 function buildVague(record, inputName, node, options) {
   const type = titleCase(record.vagueCategory);
   const processingMarkers = detectProcessingMarkers(record.canonicalName, record.tags);
+  const allergens = detectAllergenSources(record.canonicalName, [...(record.allergenSources || []), ...(node?.allergenSources || [])]);
   return {
     inputName,
     normalizedName: record.canonicalName,
@@ -171,7 +178,7 @@ function buildVague(record, inputName, node, options) {
     statusDescription: "Limited detail. The exact source is not specified by this label term.",
     tags: record.tags,
     dietFlags: record.dietFlags,
-    allergenSources: [...(node?.allergenSources || [])],
+    allergenSources: allergens,
     allergenSignalType: getSignalType(node, options),
     processingMarkers,
     vagueTerm: true,
@@ -279,20 +286,40 @@ function buildUnknown(inputName, normalizedName, node, options) {
   };
 }
 
+function withCanonicalization(result, canonicalization, inputName) {
+  const originalLabelText = String(inputName || canonicalization.rawName || "").trim();
+  return {
+    ...result,
+    displayName: canonicalization.matched ? canonicalization.displayName : result.displayName,
+    originalLabelText,
+    recognizedName: canonicalization.matched ? canonicalization.displayName : result.displayName,
+    detectedLanguage: canonicalization.detectedLanguage,
+    originalLanguage: canonicalization.originalLanguage,
+    canonicalization
+  };
+}
+
 export function classifyIngredient(input, options = {}) {
   const node = typeof input === "object" && input !== null ? input : null;
   const inputName = String(node?.rawName || node?.normalizedName || input || "").trim();
-  const normalizedName = normalizeIngredientName(node?.normalizedName || inputName);
+  const canonicalization = canonicalizeIngredientLanguage(node?.normalizedName || inputName);
+  const normalizedName = normalizeIngredientName(canonicalization.canonicalName || node?.normalizedName || inputName);
   const resolvedOptions = {
     ...options,
-    provenance: mergeIngredientProvenance(options.provenance, getNodeProvenance(node))
+    provenance: mergeIngredientProvenance(
+      options.provenance,
+      getNodeProvenance(node),
+      canonicalization.matched
+        ? createIngredientProvenance(INGREDIENT_PROVENANCE.MULTILINGUAL_ALIAS, { confidence: canonicalization.confidence })
+        : null
+    )
   };
   const category = resolvedOptions.category || "food";
   const additiveAlias = findAdditiveAlias(normalizedName);
   const existing = resolveLocalIngredientKnowledge(additiveAlias?.canonicalName || normalizedName, { category, includeAtlas: false });
 
   if (isEstablishedConcern(existing, additiveAlias, category)) {
-    return buildExisting(existing, additiveAlias, inputName, node, { ...resolvedOptions, category });
+    return withCanonicalization(buildExisting(existing, additiveAlias, inputName, node, { ...resolvedOptions, category }), canonicalization, inputName);
   }
 
   if (additiveAlias) {
@@ -310,25 +337,31 @@ export function classifyIngredient(input, options = {}) {
           aliases: additiveAlias.aliases
         }
       : existing;
-    return buildExisting(aliasKnowledge, additiveAlias, inputName, node, { ...resolvedOptions, category });
+    return withCanonicalization(buildExisting(aliasKnowledge, additiveAlias, inputName, node, { ...resolvedOptions, category }), canonicalization, inputName);
   }
 
   if (!category || category === "food" || category === "unknown") {
     const common = findCommonIngredient(normalizedName);
-    if (common) return buildCommon(common, inputName, node, {
-      ...resolvedOptions,
-      category,
-      scoreRisk: existing.confidence !== "low" ? existing.risk : "safe"
-    });
+    if (common) {
+      return withCanonicalization(buildCommon(common, inputName, node, {
+        ...resolvedOptions,
+        category,
+        scoreRisk: existing.confidence !== "low" ? existing.risk : "safe"
+      }), canonicalization, inputName);
+    }
     const vague = findVagueIngredientTerm(normalizedName);
-    if (vague) return buildVague(vague, inputName, node, { ...resolvedOptions, category });
+    if (vague) return withCanonicalization(buildVague(vague, inputName, node, { ...resolvedOptions, category }), canonicalization, inputName);
   }
 
   if (existing.confidence !== "low") {
-    return buildExisting(existing, null, inputName, node, { ...resolvedOptions, category, classificationKind: "source_backed" });
+    return withCanonicalization(
+      buildExisting(existing, null, inputName, node, { ...resolvedOptions, category, classificationKind: "source_backed" }),
+      canonicalization,
+      inputName
+    );
   }
 
-  return buildUnknown(inputName, normalizedName, node, { ...resolvedOptions, category });
+  return withCanonicalization(buildUnknown(inputName, normalizedName, node, { ...resolvedOptions, category }), canonicalization, inputName);
 }
 
 export function classifyParsedIngredients(parsed, options = {}) {

@@ -5094,6 +5094,54 @@ button {
   font-weight: 800;
 }
 
+.profile-select-grid label > small {
+  display: block;
+  margin: 6px 2px 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.35;
+}
+
+.search-region-context {
+  display: flex;
+  justify-content: flex-end;
+  margin: -8px 4px 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 750;
+}
+
+.search-global-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #dfe8e1;
+  border-radius: 14px;
+  background: #f8faf8;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.search-global-fallback button,
+.search-global-button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0 13px;
+  color: #20784d;
+  background: #e8f5ed;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 850;
+}
+
+.search-global-button {
+  align-self: center;
+}
+
 .profile-goal-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

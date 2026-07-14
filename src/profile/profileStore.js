@@ -1,4 +1,6 @@
 import { normalizeKnowledgeKey, resolveLocalIngredientKnowledge } from "../knowledge/ingredientKnowledge";
+import { sanitizeProductRegion } from "../data/productRegionConfig";
+import { sanitizeIngredientDisplayMode } from "../lib/ingredientDisplayName";
 
 export const PROFILE_STORAGE_KEY = "ziya-personal-profile-v1";
 const PROFILE_VERSION = 1;
@@ -27,6 +29,7 @@ export const DIET_PREFERENCES = Object.freeze([
 ]);
 
 export const PROFILE_LANGUAGES = Object.freeze([
+  { key: "auto", label: "Auto" },
   { key: "en", label: "English" },
   { key: "fr", label: "French" },
   { key: "es", label: "Spanish" },
@@ -139,6 +142,8 @@ export function createEmptyProfile() {
     avoidedIngredients: [],
     watchlistIngredients: [],
     preferredLanguage: "en",
+    productRegion: "global",
+    ingredientDisplayMode: "translated",
     unitSystem: "us",
     todayPlateGoals: null,
     updatedAt: null
@@ -154,6 +159,8 @@ export function sanitizeProfile(value) {
     avoidedIngredients: normalizePreferenceArray(profile.avoidedIngredients, normalizeIngredientPreference),
     watchlistIngredients: normalizePreferenceArray(profile.watchlistIngredients, normalizeIngredientPreference),
     preferredLanguage: PROFILE_LANGUAGES.some((item) => item.key === profile.preferredLanguage) ? profile.preferredLanguage : "en",
+    productRegion: sanitizeProductRegion(profile.productRegion),
+    ingredientDisplayMode: sanitizeIngredientDisplayMode(profile.ingredientDisplayMode),
     unitSystem: PROFILE_UNITS.some((item) => item.key === profile.unitSystem) ? profile.unitSystem : "us",
     todayPlateGoals: sanitizeGoals(profile.todayPlateGoals),
     updatedAt: validDate(profile.updatedAt)
@@ -218,6 +225,8 @@ export function hasMeaningfulProfile(profileValue) {
       || profile.avoidedIngredients.length
       || profile.watchlistIngredients.length
       || profile.preferredLanguage !== "en"
+      || profile.productRegion !== "global"
+      || profile.ingredientDisplayMode !== "translated"
       || profile.unitSystem !== "us"
       || profile.todayPlateGoals
   );

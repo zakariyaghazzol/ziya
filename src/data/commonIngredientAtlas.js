@@ -299,7 +299,7 @@ const GROUPS = [
     entries: [
       "oat fiber", "wheat fiber", "citrus fiber", "apple fiber", "pea fiber", "potato fiber", "bamboo fiber", "inulin",
       "chicory root fiber", "cellulose", "powdered cellulose", "soluble corn fiber", "acacia fiber", "psyllium husk",
-      "beta glucan", "resistant dextrin"
+      "beta glucan", "resistant dextrin", "dietary fiber"
     ]
   },
   {
@@ -323,7 +323,7 @@ const GROUPS = [
     nutritionRole: "Usually not a major nutrient contributor at typical formulation levels.",
     tags: ["emulsifier", "stabilizer", "texture"],
     entries: [
-      "soy lecithin", "sunflower lecithin", "lecithin", "mono and diglycerides", "xanthan gum", "guar gum", "locust bean gum",
+      "soy lecithin", "sunflower lecithin", "mono and diglycerides", "xanthan gum", "guar gum", "locust bean gum",
       "gellan gum", "pectin", "agar", "gum arabic", "carboxymethylcellulose"
     ]
   },
@@ -366,6 +366,7 @@ const SPECIAL = Object.freeze({
   "soybeans": { aliases: ["soy beans", "soya beans"], allergenSources: ["soy"] },
   "soy protein": { aliases: ["soya protein"], allergenSources: ["soy"] },
   "soy lecithin": { aliases: ["lecithin from soy", "soya lecithin", "soybean lecithin"], allergenSources: ["soy"], tags: ["emulsifier", "soy-source"] },
+  "sunflower lecithin": { aliases: ["lecithin from sunflower"], tags: ["emulsifier", "sunflower-source"] },
   "peanuts": { aliases: ["peanut", "groundnuts"], allergenSources: ["peanut"] },
   "peanut butter": { allergenSources: ["peanut"] },
   "peanut flour": { allergenSources: ["peanut"] },
@@ -388,7 +389,7 @@ const SPECIAL = Object.freeze({
   "milk powder": { aliases: ["dried milk", "dry milk"], allergenSources: ["milk"] },
   "skim milk powder": { aliases: ["lait ecreme en poudre", "lait écrémé en poudre", "poudre de lait ecreme", "poudre de lait écrémé"], allergenSources: ["milk"] },
   "whey powder": { aliases: ["lactoserum en poudre", "lactoserum", "petit lait en poudre"], allergenSources: ["milk"] },
-  "cocoa powder": { aliases: ["cacao maigre", "cacao maigre en poudre", "poudre de cacao maigre"], tags: ["cocoa", "chocolate"] },
+  "cocoa powder": { aliases: ["cacao maigre", "cacao maigre en poudre", "poudre de cacao maigre", "low-fat cocoa powder"], category: "cocoa ingredient", tags: ["cocoa", "chocolate"] },
   "modified food starch": { aliases: ["food starch modified"], tags: ["starch", "processing-marker"] },
   "modified corn starch": { aliases: ["modified maize starch"], tags: ["starch", "processing-marker"] },
   "maltodextrin": { tags: ["carbohydrate", "processing-marker"] },
@@ -406,7 +407,7 @@ const SPECIAL = Object.freeze({
   "mono and diglycerides": { aliases: ["mono- and diglycerides", "mono & diglycerides", "monoglycerides and diglycerides"], tags: ["emulsifier", "processing-marker"] },
   "carboxymethylcellulose": { aliases: ["cellulose gum", "cmc"], tags: ["stabilizer", "processing-marker"] },
   "almond milk": { aliases: ["almondmilk"], allergenSources: ["tree nuts"] },
-  "vanillin": { aliases: ["vanilline"], tags: ["flavoring"] }
+  "vanillin": { aliases: ["vanilline"], category: "flavoring compound", function: "flavoring", tags: ["flavoring", "common-flavoring"] }
 });
 
 function titleCase(value) {

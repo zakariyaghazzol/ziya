@@ -91,6 +91,8 @@ function testLocalPersistence() {
   const profile = profileWith({
     allergies: [normalizeAllergyPreference("milk")],
     preferredLanguage: "fr",
+    productRegion: "fr",
+    ingredientDisplayMode: "both",
     unitSystem: "metric"
   });
   assert.equal(saveLocalProfile(profile), true);
@@ -98,6 +100,8 @@ function testLocalPersistence() {
   const loaded = loadLocalProfile();
   assert.equal(loaded.allergies[0].key, "milk");
   assert.equal(loaded.preferredLanguage, "fr");
+  assert.equal(loaded.productRegion, "fr");
+  assert.equal(loaded.ingredientDisplayMode, "both");
   assert.equal(loaded.unitSystem, "metric");
 
   window.localStorage.setItem(PROFILE_STORAGE_KEY, "not json");
@@ -111,7 +115,9 @@ function testLocalPersistence() {
 function testConservativeProfileMerge() {
   const local = { ...profileWith({
     allergies: [normalizeAllergyPreference("milk")],
-    preferredLanguage: "fr"
+    preferredLanguage: "fr",
+    productRegion: "fr",
+    ingredientDisplayMode: "original"
   }), updatedAt: "2026-07-13T15:00:00.000Z" };
   const cloud = { ...profileWith({
     allergies: [normalizeAllergyPreference("peanuts")],
@@ -122,6 +128,8 @@ function testConservativeProfileMerge() {
   assert.deepEqual(new Set(merged.allergies.map((item) => item.key)), new Set(["milk", "peanuts"]));
   assert.equal(merged.watchlistIngredients.length, 1);
   assert.equal(merged.preferredLanguage, "fr", "newer scalar preference should win");
+  assert.equal(merged.productRegion, "fr", "newer region preference should win");
+  assert.equal(merged.ingredientDisplayMode, "original", "newer display mode should win");
 }
 
 function testDailyAndHistoryMerge() {

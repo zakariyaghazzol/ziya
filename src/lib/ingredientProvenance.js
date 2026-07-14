@@ -2,6 +2,7 @@ export const INGREDIENT_PROVENANCE = Object.freeze({
   COMMON_ATLAS: "local_common_atlas",
   VAGUE_ATLAS: "local_vague_term_atlas",
   ADDITIVE_ALIAS: "local_additive_alias_map",
+  MULTILINGUAL_ALIAS: "local_multilingual_alias_map",
   EXISTING_ADDITIVE: "existing_additive_layer",
   PRODUCT_PAYLOAD: "open_food_facts_product_payload",
   ALLERGEN_TAGS: "open_food_facts_allergen_tags",

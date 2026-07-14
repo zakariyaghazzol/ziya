@@ -7,7 +7,17 @@ import {
   resolveLocalIngredientKnowledge
 } from "./knowledge/ingredientKnowledge";
 import { sanitizeIngredientCandidates } from "./data/ingredientSanitizer";
+import { PRODUCT_REGIONS, getPreferredProductLanguages, getProductMarketLabel, getProductRegionConfig, productMatchesRegion } from "./data/productRegionConfig";
 import { classifyIngredient } from "./lib/ingredientClassifier";
+import { INGREDIENT_DISPLAY_MODES, getIngredientDisplayName } from "./lib/ingredientDisplayName";
+import {
+  OPEN_FOOD_FACTS_SEARCH_FIELDS,
+  buildOpenFoodFactsSearchParams,
+  createRegionSearchCacheKey,
+  getCachedRegionSearch,
+  setCachedRegionSearch
+} from "./lib/productRegionSearch";
+import { getSearchResultMetadata, rankAndDedupeSearchResults } from "./lib/searchResultDedupe";
 import { createProductSourceRouting, getKnowledgeSourceRoute } from "./data/sourceRouter";
 import {
   getProductOverride,
@@ -878,36 +888,7 @@ const RECENT_BARCODE_TTL_MS = 6500;
 const ENHANCED_VARIANT_INTERVAL = 4;
 const CAMERA_SETTLE_MS = 900;
 
-const OPEN_FOOD_FACTS_PRODUCT_FIELDS = [
-  "code",
-  "status",
-  "product_name",
-  "product_name_en",
-  "generic_name",
-  "brands",
-  "categories",
-  "categories_tags",
-  "image_url",
-  "image_front_url",
-  "image_front_small_url",
-  "image_front_thumb_url",
-  "selected_images",
-  "ingredients_text",
-  "ingredients_text_en",
-  "ingredients",
-  "ingredients_tags",
-  "allergens",
-  "allergens_tags",
-  "additives_n",
-  "additives_tags",
-  "additives_original_tags",
-  "nutriments",
-  "serving_size",
-  "nutriscore_grade",
-  "nova_group"
-].join(",");
-
-const OPEN_FOOD_FACTS_SEARCH_FIELDS = OPEN_FOOD_FACTS_PRODUCT_FIELDS;
+const OPEN_FOOD_FACTS_PRODUCT_FIELDS = OPEN_FOOD_FACTS_SEARCH_FIELDS.join(",");
 
 async function lookupProductByBarcode(rawBarcode, { catalog = products } = {}) {
   const barcode = normalizeBarcode(rawBarcode);
@@ -1037,30 +1018,43 @@ async function lookupUpcItemDbProduct(barcode) {
   }
 }
 
-async function searchFoodProductsByName(rawQuery, { limit = 8 } = {}) {
+async function searchFoodProductsByName(rawQuery, {
+  limit = 8,
+  regionId = "global",
+  preferredLanguage = "auto",
+  globalFallback = false
+} = {}) {
   const query = cleanText(rawQuery);
-  if (query.length < 2) return [];
+  if (query.length < 2) return { products: [], hasStrongRegionMatch: false, fallbackAvailable: false, regionId: globalFallback ? "global" : regionId, fromCache: false };
   try {
-    const params = new URLSearchParams({
-      search_terms: query,
-      search_simple: "1",
-      action: "process",
-      json: "1",
-      page_size: String(limit),
-      fields: OPEN_FOOD_FACTS_SEARCH_FIELDS
+    const searchRegion = globalFallback ? "global" : regionId;
+    const cacheKey = createRegionSearchCacheKey({ query, regionId: searchRegion, preferredLanguage, globalFallback, limit });
+    let rawProducts = getCachedRegionSearch(cacheKey);
+    const fromCache = Boolean(rawProducts);
+    if (!rawProducts) {
+      const params = buildOpenFoodFactsSearchParams(query, { regionId: searchRegion, preferredLanguage, globalFallback, limit });
+      const response = await fetchFoodSearch(params);
+      if (!response?.ok) return { products: [], hasStrongRegionMatch: false, fallbackAvailable: searchRegion !== "global", regionId: searchRegion, fromCache: false };
+      const payload = await response.json();
+      rawProducts = asArray(payload.products);
+      setCachedRegionSearch(cacheKey, rawProducts);
+    }
+    const ranked = rankAndDedupeSearchResults(rawProducts, {
+      query,
+      regionId: searchRegion,
+      preferredLanguage,
+      strictRegion: searchRegion !== "global",
+      limit
     });
-    const response = await fetchFoodSearch(params);
-    if (!response.ok) return [];
-    const payload = await response.json();
-    return asArray(payload.products)
-      .filter((product) => product?.code)
-      .map((product) => normalizeOpenFoodFactsProduct(product, normalizeBarcode(product.code)))
+    const normalizedProducts = ranked.products
+      .map((product) => normalizeOpenFoodFactsProduct(product, normalizeBarcode(product.code), { regionId: searchRegion, preferredLanguage }))
       .map((product) => applyStoredProductOverride(product))
       .filter((product) => product.name && product.brand)
       .slice(0, limit);
+    return { ...ranked, products: normalizedProducts, regionId: searchRegion, fromCache };
   } catch (error) {
     console.warn("Food name lookup failed", error);
-    return [];
+    return { products: [], hasStrongRegionMatch: false, fallbackAvailable: regionId !== "global", regionId: globalFallback ? "global" : regionId, fromCache: false };
   }
 }
 
@@ -1093,19 +1087,48 @@ async function lookupDemoProductByBarcode(barcode, catalog) {
   };
 }
 
-function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
-  const originalName = cleanText(rawProduct.product_name || rawProduct.product_name_en || rawProduct.generic_name) || `Food product ${barcode}`;
+function getLocalizedProductField(product, field, languages = []) {
+  for (const language of languages) {
+    const value = cleanText(product?.[`${field}_${language}`]);
+    if (value) return { value, language, field: `${field}_${language}` };
+  }
+  const value = cleanText(product?.[field]);
+  return value ? { value, language: cleanText(product?.lang) || "unknown", field } : null;
+}
+
+function getOpenFoodFactsMarketMetadata(rawProduct, regionId = "global") {
+  const selectedMarket = regionId !== "global" && productMatchesRegion(rawProduct, regionId)
+    ? getProductRegionConfig(regionId).label
+    : "";
+  return {
+    quantity: cleanText(rawProduct.quantity),
+    countries: cleanText(rawProduct.countries),
+    countriesTags: asArray(rawProduct.countries_tags),
+    marketLabel: selectedMarket || getProductMarketLabel(rawProduct),
+    sourceLanguage: cleanText(rawProduct.lang),
+    languagesTags: asArray(rawProduct.languages_tags),
+    completeness: toNumber(rawProduct.completeness),
+    uniqueScans: toNumber(rawProduct.unique_scans_n),
+    lastModified: toNumber(rawProduct.last_modified_t)
+  };
+}
+
+function normalizeOpenFoodFactsProduct(rawProduct, barcode, { regionId = "global", preferredLanguage = "auto" } = {}) {
+  const preferredLanguages = getPreferredProductLanguages(regionId, preferredLanguage);
+  const nameField = getLocalizedProductField(rawProduct, "product_name", preferredLanguages);
+  const originalName = nameField?.value || cleanText(rawProduct.generic_name) || `Food product ${barcode}`;
   const normalizedName = normalizeProductTextForAnalysis(originalName);
   const name = normalizedName.translated && normalizedName.translationConfidence === "high" ? normalizedName.englishText : originalName;
   const brand = cleanText(String(rawProduct.brands || "").split(",")[0]) || "Unknown brand";
   const image = pickOpenFoodFactsImage(rawProduct);
-  const ingredientResult = parseOpenFoodFactsIngredients(rawProduct);
+  const ingredientResult = parseOpenFoodFactsIngredients(rawProduct, { regionId, preferredLanguage });
   const ingredients = ingredientResult.ingredients;
   const nutrition = mapOpenFoodFactsNutrition(rawProduct);
   const categoryPath = cleanText(rawProduct.categories || asArray(rawProduct.categories_tags).join(" "));
   const normalizedCategoryPath = normalizeProductTextForAnalysis(categoryPath).englishText;
   const inferredCategory = inferCategoryFromProductText([normalizedName.englishText, brand, normalizedCategoryPath, ingredients.slice(0, 6).map((item) => item.name).join(" ")].join(" "));
   const hasFoodEvidence = inferredCategory === "food" || ingredients.length > 0 || hasCoreFoodNutrition(nutrition);
+  const marketMetadata = getOpenFoodFactsMarketMetadata(rawProduct, regionId);
   if (!["food", "unknown"].includes(inferredCategory) || (inferredCategory === "unknown" && !hasFoodEvidence)) {
     const partialProduct = createPartialIdentityProduct({
       id: `food-${barcode}`,
@@ -1119,7 +1142,8 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
       image,
       description: cleanText(rawProduct.generic_name),
       categoryPath,
-      sourceType: "food-provider"
+      sourceType: "food-provider",
+      ...marketMetadata
     });
     return {
       ...partialProduct,
@@ -1139,6 +1163,7 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
 
   const processing = mapOpenFoodFactsProcessing(rawProduct.nova_group);
   const counts = getRiskCounts(ingredients);
+  const unclassifiedCount = ingredients.filter((ingredient) => ingredient.classificationKind === "unknown").length;
   const nutritionFlags = getNutritionFlags(nutrition);
   const additivesCount = toNumber(rawProduct.additives_n);
   const hasAdditives = additivesCount > 0 || asArray(rawProduct.additives_tags).length > 0 || asArray(rawProduct.additives_original_tags).length > 0;
@@ -1149,7 +1174,7 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
   const analysisReady = hasIngredients && hasNutrition;
   const concerns = [
     ...(hasAdditives ? ["Additives listed"] : []),
-    ...(counts.unknown > 0 ? [`${counts.unknown} ${counts.unknown === 1 ? "ingredient needs" : "ingredients need"} review`] : []),
+    ...(unclassifiedCount > 0 ? [`${unclassifiedCount} ${unclassifiedCount === 1 ? "ingredient needs" : "ingredients need"} review`] : []),
     ...nutritionFlags.concerns,
     ...(processing === "Ultra-processed" ? ["Ultra-processed"] : []),
     ...ingredients
@@ -1174,6 +1199,7 @@ function normalizeOpenFoodFactsProduct(rawProduct, barcode) {
     brand,
     category: "food",
     image,
+    ...marketMetadata,
     sourceType: "food-provider",
     dataConfidence: getOpenFoodFactsConfidence({ image, ingredients, nutrition }),
     nutritionConfidence: getNutritionConfidence(nutrition),
@@ -1311,16 +1337,26 @@ function pickOpenFoodFactsImage(product) {
   );
 }
 
-function parseOpenFoodFactsIngredients(product) {
-  const sources = [
-    { field: "ingredients", value: asArray(product.ingredients) },
-    {
-      field: product.ingredients_text_en ? "ingredients_text_en" : "ingredients_text",
-      value: product.ingredients_text_en || product.ingredients_text
-    },
-    { field: "ingredients_tags", value: asArray(product.ingredients_tags) }
-  ];
+function parseOpenFoodFactsIngredients(product, { regionId = "global", preferredLanguage = "auto" } = {}) {
+  const region = getProductRegionConfig(regionId);
+  const preferredLanguages = region.id === "global"
+    ? getPreferredProductLanguages(regionId, preferredLanguage)
+    : region.preferredLanguages;
+  const localizedSources = preferredLanguages.map((language) => ({
+    field: `ingredients_text_${language}`,
+    language,
+    value: product[`ingredients_text_${language}`]
+  }));
+  const remainingLocalizedSources = ["en", "fr", "es", "ar"]
+    .filter((language) => !preferredLanguages.includes(language))
+    .map((language) => ({ field: `ingredients_text_${language}`, language, value: product[`ingredients_text_${language}`] }));
+  const rawTextSource = { field: "ingredients_text", language: cleanText(product.lang) || "unknown", value: product.ingredients_text };
+  const ingredientArraySource = { field: "ingredients", language: cleanText(product.lang) || "unknown", value: asArray(product.ingredients) };
+  const sources = region.id === "global"
+    ? [ingredientArraySource, ...localizedSources, rawTextSource, ...remainingLocalizedSources, { field: "ingredients_tags", language: "taxonomy", value: asArray(product.ingredients_tags) }]
+    : [...localizedSources, rawTextSource, ingredientArraySource, ...remainingLocalizedSources, { field: "ingredients_tags", language: "taxonomy", value: asArray(product.ingredients_tags) }];
   let selected = null;
+  let selectedSource = null;
 
   for (const source of sources) {
     if (!source.value || (Array.isArray(source.value) && !source.value.length)) continue;
@@ -1330,9 +1366,13 @@ function parseOpenFoodFactsIngredients(product) {
       detectSection: false,
       excludedTerms: [product.product_name, product.product_name_en, product.generic_name, ...String(product.brands || "").split(",")]
     });
-    if (!selected) selected = sanitation;
+    if (!selected) {
+      selected = sanitation;
+      selectedSource = source;
+    }
     if (sanitation.acceptedIngredients.length) {
       selected = sanitation;
+      selectedSource = source;
       break;
     }
   }
@@ -1351,6 +1391,8 @@ function parseOpenFoodFactsIngredients(product) {
     ingredients,
     parsing: {
       ...sanitation.metadata,
+      selectedLanguage: selectedSource?.language || "unknown",
+      selectedSourceField: selectedSource?.field || "ingredients",
       acceptedIngredients: sanitation.acceptedIngredients,
       rejectedFragments: sanitation.rejectedFragments,
       warnings: sanitation.warnings
@@ -1516,7 +1558,8 @@ function createPartialIdentityProduct({
   image = "",
   sourceType,
   description = "",
-  categoryPath = ""
+  categoryPath = "",
+  ...metadata
 }) {
   const resolvedCategory = categoryMeta[category] ? category : "unknown";
   const product = {
@@ -1529,6 +1572,7 @@ function createPartialIdentityProduct({
     sourceType,
     dataConfidence: "Partial",
     description,
+    ...metadata,
     analysisPending: true,
     summaryStatus: "Needs label",
     rating: "Partial match",
@@ -1768,6 +1812,9 @@ function createIngredientRecordFromLabel(label, category, parsedCandidate) {
     : knowledge.canonicalName;
   return {
     name: displayName,
+    displayName: knowledge.displayName || displayName,
+    canonicalName: knowledge.canonicalName,
+    recognizedName: knowledge.recognizedName || knowledge.displayName || knowledge.canonicalName,
     originalLabelText: parsedCandidate?.originalText || (knowledge.originalLabelText && knowledge.originalLabelText !== knowledge.canonicalName ? knowledge.originalLabelText : undefined),
     risk: knowledge.risk,
     scoreRisk: knowledge.scoreRisk || knowledge.risk,
@@ -2779,6 +2826,7 @@ function App() {
   const [realSearchResults, setRealSearchResults] = useState([]);
   const [searchStatus, setSearchStatus] = useState("idle");
   const [lastSearchTerm, setLastSearchTerm] = useState("");
+  const [searchMeta, setSearchMeta] = useState({ regionId: "global", hasStrongRegionMatch: false, fallbackAvailable: false, fromCache: false });
   const [manualText, setManualText] = useState("Palm oil, salt, artificial flavor, annatto color");
   const [manualCategory, setManualCategory] = useState("food");
   const [capturedPhoto, setCapturedPhoto] = useState("");
@@ -2801,6 +2849,7 @@ function App() {
   const [syncStatus, setSyncStatus] = useState("Local only");
   const [syncConsentPending, setSyncConsentPending] = useState(false);
   const syncRunUserRef = useRef("");
+  const searchRequestRef = useRef(0);
 
   const productIndex = useMemo(() => {
     const map = new Map(products.map((product) => [product.id, product]));
@@ -2834,6 +2883,13 @@ function App() {
   useEffect(() => {
     saveLocalProfile(personalProfile);
   }, [personalProfile]);
+
+  useEffect(() => {
+    searchRequestRef.current += 1;
+    setRealSearchResults([]);
+    setSearchMeta({ regionId: personalProfile.productRegion, hasStrongRegionMatch: false, fallbackAvailable: false, fromCache: false });
+    setSearchStatus((current) => current === "idle" ? "idle" : "ready");
+  }, [personalProfile.productRegion]);
 
   useEffect(() => {
     if (!supabase) {
@@ -3034,12 +3090,13 @@ function App() {
       setRealSearchResults([]);
       setLastSearchTerm("");
       setSearchStatus("idle");
+      setSearchMeta({ regionId: personalProfile.productRegion, hasStrongRegionMatch: false, fallbackAvailable: false, fromCache: false });
       return;
     }
     setSearchStatus("ready");
   }
 
-  async function runProductSearch(nextQuery = query) {
+  async function runProductSearch(nextQuery = query, { globalFallback = false } = {}) {
     const searchTerm = cleanText(nextQuery);
     if (searchTerm.length < 2) {
       setRealSearchResults([]);
@@ -3049,9 +3106,21 @@ function App() {
     }
     setSearchStatus("searching");
     setLastSearchTerm(searchTerm);
-    const results = await searchFoodProductsByName(searchTerm);
-    setRealSearchResults(results);
-    if (results.length) upsertDynamicProducts(results);
+    const requestId = ++searchRequestRef.current;
+    const result = await searchFoodProductsByName(searchTerm, {
+      regionId: personalProfile.productRegion,
+      preferredLanguage: personalProfile.preferredLanguage,
+      globalFallback
+    });
+    if (requestId !== searchRequestRef.current) return;
+    setRealSearchResults(result.products);
+    setSearchMeta({
+      regionId: result.regionId,
+      hasStrongRegionMatch: result.hasStrongRegionMatch,
+      fallbackAvailable: result.fallbackAvailable,
+      fromCache: result.fromCache
+    });
+    if (result.products.length) upsertDynamicProducts(result.products);
     setSearchStatus("done");
   }
 
@@ -3241,7 +3310,10 @@ function App() {
           results={realSearchResults}
           status={searchStatus}
           lastSearchTerm={lastSearchTerm}
+          searchMeta={searchMeta}
+          selectedRegionId={personalProfile.productRegion}
           onSearch={runProductSearch}
+          onGlobalFallback={() => runProductSearch(query, { globalFallback: true })}
           onOpenProduct={openProduct}
         />
       );
@@ -5587,12 +5659,14 @@ const featuredSampleIds = [
   "body-scrubber"
 ];
 
-function SearchScreen({ query, setQuery, results, status, lastSearchTerm, onSearch, onOpenProduct }) {
+function SearchScreen({ query, setQuery, results, status, lastSearchTerm, searchMeta, selectedRegionId, onSearch, onGlobalFallback, onOpenProduct }) {
   const samples = featuredSampleIds
     .map((id) => products.find((product) => product.id === id))
     .filter(Boolean)
     .slice(0, 5);
   const showIntro = !query.trim();
+  const selectedRegion = getProductRegionConfig(selectedRegionId);
+  const showingGlobalFallback = selectedRegion.id !== "global" && searchMeta.regionId === "global";
 
   return (
     <div className="stack">
@@ -5614,6 +5688,9 @@ function SearchScreen({ query, setQuery, results, status, lastSearchTerm, onSear
           <ChevronRight size={20} />
         </button>
       </form>
+      <div className="search-region-context">
+        <span>{showingGlobalFallback ? "Showing global results" : `Product region: ${selectedRegion.label}`}</span>
+      </div>
       {status === "searching" ? (
         <EmptyState title="Searching products" copy="Looking for matching food labels and images." />
       ) : showIntro ? (
@@ -5634,13 +5711,29 @@ function SearchScreen({ query, setQuery, results, status, lastSearchTerm, onSear
             </div>
           </div>
           {results.length ? (
-            results.map((product) => (
-              <ProductListCard key={product.id} product={product} onClick={() => onOpenProduct(product.id)} />
-            ))
+            <>
+              {results.map((product) => (
+                <ProductListCard key={product.id} product={product} showMarketMeta onClick={() => onOpenProduct(product.id)} />
+              ))}
+              {searchMeta.fallbackAvailable && !searchMeta.hasStrongRegionMatch && selectedRegion.id !== "global" && !showingGlobalFallback && (
+                <div className="search-global-fallback">
+                  <span>No strong match found in your selected region.</span>
+                  <button type="button" onClick={onGlobalFallback}>Search global results</button>
+                </div>
+              )}
+            </>
           ) : status === "ready" ? (
             <EmptyState title="Ready to search" copy="Press Enter to look up matching products." />
           ) : (
-            <EmptyState title="No products found" copy="Try another product name or scan a barcode." />
+            <>
+              <EmptyState
+                title={searchMeta.fallbackAvailable && selectedRegion.id !== "global" ? "No strong regional match" : "No products found"}
+                copy={searchMeta.fallbackAvailable && selectedRegion.id !== "global" ? "Try global results or scan the barcode." : "Try another product name or scan a barcode."}
+              />
+              {searchMeta.fallbackAvailable && selectedRegion.id !== "global" && !showingGlobalFallback && (
+                <button className="search-global-button" type="button" onClick={onGlobalFallback}>Search global results</button>
+              )}
+            </>
           )}
         </section>
       )}
@@ -5937,8 +6030,9 @@ function ReportScreen({
   const additives = getProductAdditives(intelligenceProduct);
   const allergens = getAllergenGroups(product.allergens);
   const nutritionCount = getAvailableNutritionRows(product.nutrition).length;
+  const unclassifiedIngredientCount = ingredients.filter((ingredient) => ingredient.classificationKind === "unknown").length;
   const ingredientSubtitle = ingredients.length
-    ? `${ingredients.length} ingredients · ${counts.moderate + counts.harmful} flagged${counts.unknown ? ` · ${counts.unknown} need review` : ""}`
+    ? `${ingredients.length} ingredients · ${counts.moderate + counts.harmful} flagged${unclassifiedIngredientCount ? ` · ${unclassifiedIngredientCount} need review` : ""}`
     : "Needs label";
   const personalAlerts = useMemo(
     () => getPersonalAlerts(intelligenceProduct, personalProfile),
@@ -6024,7 +6118,7 @@ function ReportScreen({
             setExpandedSection={setExpandedSection}
           >
             {ingredients.length ? (
-              <IngredientRows ingredients={ingredients} category={product.category} onIngredientClick={onIngredientClick} />
+              <IngredientRows ingredients={ingredients} category={product.category} displayMode={personalProfile?.ingredientDisplayMode} onIngredientClick={onIngredientClick} />
             ) : (
               <MissingReportData copy={isTextile ? "Add the material tag to complete this summary." : "Add the ingredient label to complete this report."} />
             )}
@@ -6056,7 +6150,7 @@ function ReportScreen({
                 setExpandedSection={setExpandedSection}
               >
                 {additives.length ? (
-                  <IngredientRows ingredients={additives} category={product.category} onIngredientClick={onIngredientClick} additive />
+                  <IngredientRows ingredients={additives} category={product.category} displayMode={personalProfile?.ingredientDisplayMode} onIngredientClick={onIngredientClick} additive />
                 ) : (
                   <MissingReportData copy={product.fieldConfidence?.additives === "Missing" ? "Add the ingredient label to review additives." : "No additives are listed in the available product data."} />
                 )}
@@ -6170,10 +6264,11 @@ function MissingReportData({ copy }) {
   return <p className="report-missing">{copy}</p>;
 }
 
-function IngredientRows({ ingredients, category, onIngredientClick, additive = false }) {
+function IngredientRows({ ingredients, category, onIngredientClick, additive = false, displayMode = "translated" }) {
   return (
     <div className="report-row-list ingredient-row-list">
       {ingredients.map((ingredient, index) => {
+        const display = getIngredientDisplayName(ingredient, displayMode);
         const risk = riskMeta[ingredient.risk] || riskMeta.unknown;
         const statusLabel = ingredient.statusLabel || risk.label;
         const statusTone = ingredient.risk === "harmful"
@@ -6184,13 +6279,13 @@ function IngredientRows({ ingredients, category, onIngredientClick, additive = f
         return (
           <button
             className="ingredient-report-row"
-            key={`${ingredient.name}-${ingredient.type || index}`}
-            onClick={() => onIngredientClick({ ...ingredient, productCategory: category })}
+            key={`${ingredient.canonicalName || ingredient.name}-${ingredient.type || index}`}
+            onClick={() => onIngredientClick({ ...ingredient, productCategory: category, ingredientDisplayMode: displayMode })}
           >
             <span className={`status-dot ${statusTone}`} />
             <span className="ingredient-report-copy">
-              <strong>{ingredient.name}</strong>
-              <small>{ingredient.type || (additive ? "Listed additive" : "Purpose not available")}</small>
+              <strong>{display.primaryName}</strong>
+              <small>{[display.secondaryText, ingredient.type || (additive ? "Listed additive" : "Purpose not available")].filter(Boolean).join(" · ")}</small>
             </span>
             <span className={`ingredient-risk-label ${risk.className}`}>{statusLabel}</span>
             <ChevronRight size={17} />
@@ -7143,7 +7238,7 @@ function ProfileScreen({ profile, onChange, onBack, dailyTotals, dailyLog, goals
       <section className="card profile-section-card">
         <div className="profile-section-heading">
           <span><Languages size={18} /></span>
-          <div><h2>App preferences</h2><p>Analysis remains in English for now; language is saved for future localization.</p></div>
+          <div><h2>App preferences</h2><p>Choose your preferred product market and how recognized label ingredients appear.</p></div>
         </div>
         <div className="profile-select-grid">
           <label>
@@ -7156,6 +7251,19 @@ function ProfileScreen({ profile, onChange, onBack, dailyTotals, dailyLog, goals
             <span>Units</span>
             <select value={profile.unitSystem} onChange={(event) => onChange({ unitSystem: event.target.value })}>
               {PROFILE_UNITS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Product region</span>
+            <select value={profile.productRegion} onChange={(event) => onChange({ productRegion: event.target.value })}>
+              {PRODUCT_REGIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+            <small>Preferred sold-in market, not guaranteed origin.</small>
+          </label>
+          <label>
+            <span>Ingredient display</span>
+            <select value={profile.ingredientDisplayMode} onChange={(event) => onChange({ ingredientDisplayMode: event.target.value })}>
+              {INGREDIENT_DISPLAY_MODES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
             </select>
           </label>
         </div>
@@ -7280,7 +7388,7 @@ function ProfileIngredientEditor({ title, copy, items, placeholder, onAdd, onRem
   );
 }
 
-function ProductListCard({ product, onClick, meta }) {
+function ProductListCard({ product, onClick, meta, showMarketMeta = false }) {
   const category = categoryMeta[product.category];
   const Icon = category.icon;
   if (meta) {
@@ -7300,6 +7408,8 @@ function ProductListCard({ product, onClick, meta }) {
       </button>
     );
   }
+  const searchMetadata = showMarketMeta ? getSearchResultMetadata(product) : null;
+  const productSubtitle = [product.brand, searchMetadata?.market, searchMetadata?.quantity].filter(Boolean).join(" · ");
   return (
     <button className="product-list-card" onClick={onClick}>
       <ProductImage product={product} alt={product.name} />
@@ -7309,7 +7419,7 @@ function ProductListCard({ product, onClick, meta }) {
           {category.shortLabel}
         </span>
         <strong>{product.name}</strong>
-        <small>{product.brand}</small>
+        <small>{productSubtitle || product.brand}</small>
         {meta && <small>{meta}</small>}
       </div>
       <div className={`list-score ${product.analysisPending || product.category === "medicine" || product.category === "textile" ? "neutral" : getScoreClass(product.score)}`}>
@@ -7422,7 +7532,7 @@ function FoodContributionSheet({ target, plateState, onClose, onUpdate, onRemove
 }
 
 function IngredientSheet({ ingredient, onClose }) {
-  const ingredientQuery = ingredient.normalizedLabelText || ingredient.name || ingredient.originalLabelText;
+  const ingredientQuery = ingredient.canonicalName || ingredient.recognizedName || ingredient.normalizedLabelText || ingredient.name || ingredient.originalLabelText;
   const localKnowledge = useMemo(
     () => resolveLocalIngredientKnowledge(ingredientQuery, { category: ingredient.productCategory }),
     [ingredient.productCategory, ingredientQuery]
@@ -7454,15 +7564,17 @@ function IngredientSheet({ ingredient, onClose }) {
   const originalLabelText = ingredient.originalLabelText || knowledge.originalLabelText;
   const originalDiffers = originalLabelText
     && normalizeKnowledgeDisplay(originalLabelText) !== normalizeKnowledgeDisplay(knowledge.canonicalName);
+  const recognizedDisplayName = knowledge.displayName || knowledge.canonicalName;
+  const display = getIngredientDisplayName({ ...ingredient, displayName: recognizedDisplayName }, ingredient.ingredientDisplayMode);
   const aliases = (knowledge.aliases || []).filter((alias) => normalizeKnowledgeDisplay(alias) !== normalizeKnowledgeDisplay(knowledge.canonicalName)).slice(0, 8);
   return (
     <div className="sheet-backdrop" onClick={onClose}>
-      <div className="ingredient-sheet" role="dialog" aria-modal="true" aria-label={`${knowledge.canonicalName} details`} onClick={(event) => event.stopPropagation()}>
+      <div className="ingredient-sheet" role="dialog" aria-modal="true" aria-label={`${display.primaryName} details`} onClick={(event) => event.stopPropagation()}>
         <div className="sheet-handle" />
         <div className="sheet-header">
           <div>
             <span className={`risk-pill ${risk.className}`}>{statusLabel}</span>
-            <h2>{knowledge.canonicalName}</h2>
+            <h2>{display.primaryName}</h2>
           </div>
           <button onClick={onClose} aria-label="Close ingredient details">
             <X size={20} />
@@ -7475,6 +7587,7 @@ function IngredientSheet({ ingredient, onClose }) {
             value={`${originalLabelText}${knowledge.translationConfidence === "low" ? " · Translation needs review; verify label" : ""}`}
           />
         )}
+        {originalDiffers && <InfoBlock label="Recognized as" value={recognizedDisplayName} />}
         {aliases.length > 0 && <InfoBlock label="Also known as" value={aliases.join(", ")} />}
         <InfoBlock label="What it is" value={knowledge.plainDescription || knowledge.summary || knowledge.type} />
         <InfoBlock label="Why it is used" value={knowledge.whyUsed || knowledge.use} />
@@ -7655,10 +7768,12 @@ export {
   normalizeNutrition,
   normalizeNutritionForServing,
   parseOpenFoodFactsIngredients,
+  searchFoodProductsByName,
   sanitizePlateGoals,
   shiftLocalDateKey,
   updatePlateEntryInState,
-  removePlateEntryFromState
+  removePlateEntryFromState,
+  upgradeLegacyIngredientRecord
 };
 
 if (typeof document !== "undefined") {

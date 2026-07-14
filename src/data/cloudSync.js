@@ -154,6 +154,8 @@ async function fetchCloudBundle(client, userId) {
       avoidedIngredients: preferenceRow?.avoided_ingredients,
       watchlistIngredients: preferenceRow?.watchlist_ingredients,
       preferredLanguage: profileRow?.preferred_language,
+      productRegion: profileRow?.product_region,
+      ingredientDisplayMode: profileRow?.ingredient_display_mode,
       unitSystem: profileRow?.unit_system,
       todayPlateGoals: goalsRow?.goals,
       updatedAt: newestIso(profileRow?.updated_at, preferenceRow?.updated_at, goalsRow?.updated_at)
@@ -223,6 +225,8 @@ async function upsertCloudBundle(client, userId, bundle, displayName) {
       id: userId,
       display_name: displayName || null,
       preferred_language: bundle.profile.preferredLanguage,
+      product_region: bundle.profile.productRegion,
+      ingredient_display_mode: bundle.profile.ingredientDisplayMode,
       unit_system: bundle.profile.unitSystem,
       updated_at: updatedAt
     }, { onConflict: "id" }),

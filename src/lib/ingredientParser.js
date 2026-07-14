@@ -37,6 +37,8 @@ function foldAccents(value) {
 
 export function normalizeIngredientName(value) {
   let normalized = foldAccents(cleanText(value))
+    .replace(/œ/g, "oe")
+    .replace(/æ/g, "ae")
     .replace(/[\u2010-\u2015\u2212]/g, "-")
     .replace(/\bflavours?\b/gi, (match) => match.toLowerCase().endsWith("s") ? "flavors" : "flavor")
     .replace(/\bflavouring(s)?\b/gi, (_, plural) => plural ? "flavorings" : "flavoring")
@@ -45,6 +47,7 @@ export function normalizeIngredientName(value) {
     .replace(/^\s*(?:contains?\s+)?(?:less than\s+)?\d+(?:\.\d+)?\s*%\s*(?:or less)?\s*(?:of)?\s*/i, "")
     .replace(/^\s*(?:contains\s+)?(?:two|2)\s*%\s*or\s*less\s*(?:of)?\s*/i, "")
     .replace(/^\s*(?:less than\s+(?:two|2)\s*%\s*(?:of)?\s*)/i, "")
+    .replace(/\s+\d+(?:[.,]\d+)?\s*%\s*$/i, "")
     .replace(/^\s*[a-z]{2}:\s*/i, "")
     .replace(/[\u2022\u25aa\u25e6]/g, " ")
     .replace(/\s*\/\s*/g, " / ")
@@ -121,15 +124,17 @@ function isGarbage(value) {
 }
 
 function extractParenthetical(value) {
-  let depth = 0;
+  const closingFor = { "(": ")", "[": "]" };
+  const stack = [];
   let open = -1;
   for (let index = 0; index < value.length; index += 1) {
     const char = value[index];
-    if (char === "(" && depth === 0) open = index;
-    if (char === "(") depth += 1;
-    if (char === ")") {
-      depth -= 1;
-      if (depth === 0 && open >= 0) {
+    if (closingFor[char]) {
+      if (!stack.length) open = index;
+      stack.push(closingFor[char]);
+    } else if (stack.length && char === stack[stack.length - 1]) {
+      stack.pop();
+      if (!stack.length && open >= 0) {
         return { base: `${value.slice(0, open)} ${value.slice(index + 1)}`.trim(), inside: value.slice(open + 1, index), start: open, end: index };
       }
     }
@@ -137,8 +142,23 @@ function extractParenthetical(value) {
   return { base: value, inside: "", start: -1, end: -1 };
 }
 
+function splitImplicitBracketTail(value) {
+  const match = String(value || "").match(/^(.+?\[[^\[\]]+\])\s+([^,;]+)$/);
+  return match ? [match[1].trim(), match[2].trim()] : [value];
+}
+
+function splitFunctionChildren(value) {
+  const match = String(value || "").match(/^([^:]{2,48}):\s*(.+)$/);
+  if (!match) return null;
+  const parent = normalizeIngredientName(match[1]);
+  if (!/^(?:emulsifiers?|emulsifiants?|stabilizers?|stabilisants?|flavorings?|aromes?|colorings?|colorants?)$/.test(parent)) return null;
+  return { parent: match[1].trim(), children: splitNestedItems(match[2]) };
+}
+
 function parseNode(segment, parentName = null, depth = 0, rejectedFragments = []) {
-  const rawName = cleanText(segment);
+  const sourceName = cleanText(segment);
+  const functionChildren = splitFunctionChildren(sourceName);
+  const rawName = functionChildren?.parent || sourceName;
   const rejectionReason = isGarbage(rawName);
   if (rejectionReason) {
     rejectedFragments.push({ rawName, normalizedName: normalizeIngredientName(rawName), rejectionReason });
@@ -171,6 +191,12 @@ function parseNode(segment, parentName = null, depth = 0, rejectedFragments = []
         .map((item) => parseNode(applyParentContext(item, normalizedName), normalizedName, depth + 1, rejectedFragments))
         .filter(Boolean);
     }
+  }
+
+  if (functionChildren?.children.length) {
+    node.children.push(...functionChildren.children
+      .map((item) => parseNode(item, normalizedName, depth + 1, rejectedFragments))
+      .filter(Boolean));
   }
 
   const directAllergen = allergenFor(normalizedName);
@@ -228,6 +254,7 @@ export function parseIngredientList(input) {
     .trim();
   const rejectedFragments = [];
   const directIngredients = splitTopLevel(directText)
+    .flatMap(splitImplicitBracketTail)
     .map((segment) => parseNode(segment, null, 0, rejectedFragments))
     .filter(Boolean);
 

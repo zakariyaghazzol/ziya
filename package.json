@@ -6,7 +6,9 @@
     "test:data-quality": "node scripts/run-data-quality-tests.cjs",
     "test:profile": "node scripts/run-profile-tests.cjs",
     "test:ingredient-parser": "node scripts/test-ingredient-parser.cjs",
-    "test:ingredient-coverage": "node scripts/test-ingredient-coverage.cjs"
+    "test:ingredient-coverage": "node scripts/test-ingredient-coverage.cjs",
+    "test:multilingual-ingredients": "node scripts/test-multilingual-ingredients.cjs",
+    "test:region-search": "node scripts/test-region-search.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.2",

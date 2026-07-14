@@ -35,7 +35,7 @@ function testCommonAndVagueCoverage() {
   expectCommon("milk powder", "dairy ingredient", "Milk source");
   expectCommon("soy lecithin", "emulsifier", "Soy source");
 
-  const hazelnuts = expectCommon("noisettes", "nut", "Tree Nuts source");
+  const hazelnuts = expectCommon("noisettes", "nut", "Tree nut source");
   assert.equal(hazelnuts.canonicalName, "hazelnuts");
   assert(hazelnuts.allergenSources.includes("tree nuts"));
 
@@ -43,7 +43,7 @@ function testCommonAndVagueCoverage() {
   assert.equal(wheyPowder.canonicalName, "whey powder");
   assert(wheyPowder.allergenSources.includes("milk"));
 
-  const vanillin = expectCommon("vanilline", "food base");
+  const vanillin = expectCommon("vanilline", "flavoring compound", "Common flavoring");
   assert.equal(vanillin.canonicalName, "vanillin");
 
   assert.equal(expectCommon("sucre", "sweetener").canonicalName, "sugar");
