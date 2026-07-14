@@ -10,6 +10,7 @@ import { sanitizeIngredientCandidates } from "./data/ingredientSanitizer";
 import { PRODUCT_REGIONS, getPreferredProductLanguages, getProductMarketLabel, getProductRegionConfig, productMatchesRegion } from "./data/productRegionConfig";
 import { classifyIngredient } from "./lib/ingredientClassifier";
 import { INGREDIENT_DISPLAY_MODES, getIngredientDisplayName } from "./lib/ingredientDisplayName";
+import { buildBetterMatches } from "./lib/betterMatches";
 import {
   OPEN_FOOD_FACTS_SEARCH_FIELDS,
   buildOpenFoodFactsSearchParams,
@@ -2716,6 +2717,37 @@ function calculateDailyTotals(entries = []) {
   return totals;
 }
 
+const PLATE_MACROS = Object.freeze(["protein", "carbs", "fat"]);
+
+function nutrientProgressState(total = {}, goal) {
+  const knownCount = Number(total.knownCount) || 0;
+  const missingCount = Number(total.missingCount) || 0;
+  const hasLoggedFoods = knownCount + missingCount > 0;
+  const hasKnownTotal = !hasLoggedFoods || knownCount > 0;
+  const numericGoal = toNumber(goal);
+  const numericTotal = hasKnownTotal && hasNumber(total.total) ? total.total : null;
+  const progress = hasNumber(numericTotal) && hasNumber(numericGoal) && numericGoal > 0
+    ? clamp((numericTotal / numericGoal) * 100, 0, 100)
+    : 0;
+  return {
+    total: numericTotal,
+    goal: hasNumber(numericGoal) && numericGoal > 0 ? numericGoal : null,
+    progress,
+    knownCount,
+    missingCount,
+    partial: missingCount > 0,
+    hasLoggedFoods
+  };
+}
+
+function buildMacroChartData(totals = {}, goals = {}) {
+  return PLATE_MACROS.map((nutrient) => ({
+    nutrient,
+    ...PLATE_NUTRIENT_META[nutrient],
+    ...nutrientProgressState(totals[nutrient], goals[nutrient])
+  }));
+}
+
 function formatNutrientValue(value, nutrient) {
   if (!hasNumber(value)) return "Missing";
   const digits = Number.isInteger(value) ? 0 : nutrient === "calories" || nutrient === "sodium" ? 1 : 2;
@@ -3331,6 +3363,7 @@ function App() {
           onChange={updatePersonalProfile}
           onBack={() => setActiveTab("top")}
           dailyTotals={dailyTotals}
+          plateTotals={plateTotals}
           dailyLog={dailyLog}
           goals={plateState.goals}
           onSaveGoals={savePlateGoals}
@@ -3362,6 +3395,7 @@ function App() {
           onAddToDailyLog={addToDailyLog}
           dailyTotals={dailyTotals}
           dailyLog={dailyLog}
+          plateGoals={plateState.goals}
           actionOpen={actionOpen}
           setActionOpen={setActionOpen}
           platform={platform}
@@ -3403,6 +3437,7 @@ function App() {
         onAddToDailyLog={addToDailyLog}
         dailyTotals={dailyTotals}
         dailyLog={dailyLog}
+        plateGoals={plateState.goals}
         actionOpen={actionOpen}
         setActionOpen={setActionOpen}
         platform={platform}
@@ -3479,6 +3514,7 @@ function ScanScreen({
   onAddToDailyLog,
   dailyTotals,
   dailyLog,
+  plateGoals,
   actionOpen,
   setActionOpen,
   platform,
@@ -4949,6 +4985,7 @@ function ScanScreen({
         onAddToDailyLog={onAddToDailyLog}
         dailyTotals={dailyTotals}
         dailyLog={dailyLog}
+        plateGoals={plateGoals}
         actionOpen={actionOpen}
         setActionOpen={setActionOpen}
         platform={platform}
@@ -5034,6 +5071,7 @@ function ScannerBottomSheet({
   onAddToDailyLog,
   dailyTotals,
   dailyLog,
+  plateGoals,
   actionOpen,
   setActionOpen,
   platform,
@@ -5332,6 +5370,7 @@ function ScannerBottomSheet({
             onAddToDailyLog={onAddToDailyLog}
             dailyTotals={dailyTotals}
             dailyLog={dailyLog}
+            plateGoals={plateGoals}
             actionOpen={actionOpen}
             setActionOpen={setActionOpen}
             platform={platform}
@@ -6211,6 +6250,7 @@ function ReportScreen({
   onAddToDailyLog,
   dailyTotals,
   dailyLog,
+  plateGoals,
   actionOpen,
   setActionOpen,
   platform,
@@ -6324,6 +6364,18 @@ function ReportScreen({
             <ReportFactList items={positives} tone="green" kind="positive" />
           </ExpandableSection>
 
+          <BetterMatches
+            product={intelligenceProduct}
+            productIndex={productIndex}
+            profile={personalProfile}
+            dailyTotals={dailyTotals}
+            dailyLog={dailyLog}
+            plateGoals={plateGoals}
+            onOpenProduct={onOpenProduct}
+            expandedSection={expandedSection}
+            setExpandedSection={setExpandedSection}
+          />
+
           <ExpandableSection
             id="ingredients"
             title={isTextile ? "Materials" : "Ingredients"}
@@ -6428,13 +6480,6 @@ function ReportScreen({
             </ExpandableSection>
           )}
 
-          <Alternatives
-            product={product}
-            productIndex={productIndex}
-            onOpenProduct={onOpenProduct}
-            expandedSection={expandedSection}
-            setExpandedSection={setExpandedSection}
-          />
         </>
       )}
     </div>
@@ -6781,114 +6826,69 @@ function PlateReportAction({ product, alreadyAdded, onAdd }) {
   );
 }
 
-const comparableTypePatterns = {
-  popcorn: /popcorn/i,
-  crackers: /cracker|cheddar square/i,
-  cereal: /cereal|granola/i,
-  bars: /protein bar|snack bar|energy bar|granola bar/i,
-  spreads: /peanut butter|hazelnut spread|nut butter|seed butter/i,
-  soda: /soda|soft drink|cola/i,
-  shampoo: /shampoo/i,
-  lotion: /lotion|moisturizer/i,
-  deodorant: /deodorant|antiperspirant/i,
-  detergent: /laundry detergent/i,
-  dishSoap: /dish soap|dishwashing liquid/i,
-  cleaner: /all purpose cleaner|all-purpose cleaner|surface cleaner/i,
-  shirt: /shirt|tee|t-shirt/i,
-  towel: /towel/i
-};
+function BetterMatches({
+  product,
+  productIndex,
+  profile,
+  dailyTotals,
+  dailyLog,
+  plateGoals,
+  onOpenProduct,
+  expandedSection,
+  setExpandedSection
+}) {
+  const result = useMemo(() => buildBetterMatches({
+    product,
+    candidates: productIndex,
+    profile,
+    plate: {
+      goals: plateGoals || profile?.todayPlateGoals,
+      totals: dailyTotals,
+      entryCount: dailyLog?.length || 0
+    },
+    selectedRegion: profile?.productRegion || "global"
+  }), [dailyLog?.length, dailyTotals, plateGoals, product, productIndex, profile]);
 
-function getComparableTypes(product) {
-  const text = `${product.name || ""} ${product.categoryPath || ""} ${product.description || ""}`;
-  return Object.entries(comparableTypePatterns).filter(([, pattern]) => pattern.test(text)).map(([type]) => type);
-}
-
-function getAlternativeReason(source, candidate, sharedType) {
-  const typeLabels = {
-    popcorn: "popcorn snack",
-    crackers: "savory cracker",
-    cereal: "cereal",
-    bars: "snack bar",
-    spreads: "spread",
-    soda: "soft drink",
-    shampoo: "shampoo",
-    lotion: "moisturizer",
-    deodorant: "deodorant",
-    detergent: "laundry detergent",
-    dishSoap: "dish soap",
-    cleaner: "surface cleaner",
-    shirt: "shirt",
-    towel: "towel"
-  };
-  const improvements = [];
-  if (hasNumber(candidate.score) && hasNumber(source.score) && candidate.score > source.score) improvements.push("better overall evaluation");
-  if ((candidate.ingredients?.length || Infinity) < (source.ingredients?.length || 0)) improvements.push("shorter ingredient list");
-  if (getProductAdditives(candidate).length < getProductAdditives(source).length) improvements.push("fewer listed additives");
-  if (/minimal/i.test(candidate.processing || "") && !/minimal/i.test(source.processing || "")) improvements.push("less processing");
-  return `Similar ${typeLabels[sharedType] || "product"} · ${improvements[0] || "more complete product data"}`;
-}
-
-function getComparableAlternatives(product, productIndex) {
-  if (!productIndex || ["medicine", "unknown"].includes(product.category)) return [];
-  const sourceTypes = getComparableTypes(product);
-  if (!sourceTypes.length) return [];
-  const preferred = new Set(product.alternatives || []);
-  const verifiedSampleIds = new Set(["pop-secret", "skinny-pop"]);
-  return [...productIndex.values()]
-    .filter((candidate) =>
-      candidate.id !== product.id
-      && candidate.category === product.category
-      && !candidate.analysisPending
-      && (["food-provider", "barcode-provider"].includes(candidate.sourceType) || verifiedSampleIds.has(candidate.id))
-    )
-    .map((candidate) => {
-      const candidateTypes = getComparableTypes(candidate);
-      const sharedType = sourceTypes.find((type) => candidateTypes.includes(type));
-      if (!sharedType) return null;
-      const scoreImprovement = hasNumber(candidate.score) && hasNumber(product.score) && candidate.score > product.score;
-      const additiveImprovement = getProductAdditives(candidate).length < getProductAdditives(product).length;
-      const ingredientImprovement = candidate.ingredients?.length > 0 && candidate.ingredients.length < (product.ingredients?.length || Infinity);
-      const processingImprovement = /minimal/i.test(candidate.processing || "") && !/minimal/i.test(product.processing || "");
-      if (!scoreImprovement && !additiveImprovement && !ingredientImprovement && !processingImprovement) return null;
-      const completeness = [candidate.image, candidate.ingredients?.length, hasCoreFoodNutrition(candidate.nutrition)].filter(Boolean).length;
-      return {
-        product: candidate,
-        sharedType,
-        rank: (preferred.has(candidate.id) ? 3 : 0) + (scoreImprovement ? 3 : 0) + (additiveImprovement ? 2 : 0) + completeness
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => b.rank - a.rank)
-    .slice(0, 3);
-}
-
-function Alternatives({ product, productIndex, onOpenProduct, expandedSection, setExpandedSection }) {
-  const alternatives = getComparableAlternatives(product, productIndex);
   return (
     <ExpandableSection
-      id="alternatives"
-      title="Better alternatives"
-      subtitle={alternatives.length ? `${alternatives.length} similar ${alternatives.length === 1 ? "product" : "products"}` : "No strong matches yet"}
+      id="better-matches"
+      title="Better matches for you"
+      subtitle={result.matches.length ? `${result.matches.length} comparable ${result.matches.length === 1 ? "product" : "products"}` : "No strong matches yet"}
       icon={Leaf}
       expandedSection={expandedSection}
       setExpandedSection={setExpandedSection}
     >
-      {alternatives.length ? (
-        <div className="alternative-list report-alternatives">
-          {alternatives.map(({ product: alternative, sharedType }) => (
-            <button key={alternative.id} onClick={() => onOpenProduct(alternative.id)}>
-              <ProductImage product={alternative} alt={alternative.name} />
-              <div>
-                <strong>{alternative.name}</strong>
-                <span>{alternative.brand}</span>
-                <small>{getAlternativeReason(product, alternative, sharedType)}</small>
+      {result.matches.length ? (
+        <div className="better-match-list">
+          {result.matches.map((match) => (
+            <button className="better-match-card" key={match.product.id} onClick={() => onOpenProduct(match.product.id)}>
+              <ProductImage product={match.product} alt={match.product.name} />
+              <div className="better-match-copy">
+                <span className="better-match-kicker">
+                  {match.label}
+                  {match.isDemo && <i>Demo</i>}
+                </span>
+                <strong>{match.product.name}</strong>
+                <small className="better-match-meta">
+                  {[match.product.brand, match.product.marketLabel, match.product.quantity].filter(Boolean).join(" · ")}
+                </small>
+                <span className="better-match-reasons">
+                  {match.reasons.map((reason) => <small key={reason}><Check size={13} />{reason}</small>)}
+                </span>
+                {match.caveats[0] && <small className="better-match-caveat">{match.caveats[0]}</small>}
               </div>
-              <em>{getScoreLabel(alternative)}</em>
+              <span className="better-match-status">
+                <em>{getScoreLabel(match.product)}</em>
+                <ChevronRight size={17} />
+              </span>
             </button>
           ))}
         </div>
       ) : (
-        <MissingReportData copy="No strong comparable alternatives found yet." />
+        <div className="better-match-empty">
+          <strong>No strong matches yet</strong>
+          <p>{result.emptyReason}</p>
+        </div>
       )}
     </ExpandableSection>
   );
@@ -7093,6 +7093,7 @@ function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry }) {
   const goals = day?.goalsSnapshot || (isToday ? plateState.goals : null);
   const entries = day?.entries || [];
   const totals = calculateDailyTotals(entries);
+  const partialNutrients = PLATE_NUTRIENTS.filter((nutrient) => totals[nutrient].missingCount > 0);
 
   useEffect(() => {
     setDateKey(todayKey);
@@ -7101,7 +7102,13 @@ function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry }) {
   if (isToday && (!plateState.goals || editingGoals)) {
     return (
       <div className="stack plate-content">
-        <Header eyebrow="Today’s Plate" title={editingGoals ? "Edit daily goals" : "Set your daily goals"} subtitle={editingGoals ? "Update the nutrition targets you want to track." : "Choose the nutrition targets you want to track."} />
+        <div className="plate-dashboard-header">
+          <div>
+            <span className="eyebrow">Today's Plate</span>
+            <h1>{editingGoals ? "Edit daily goals" : "Set your daily goals"}</h1>
+            <p>{editingGoals ? "Update the nutrition targets you want to track." : "Choose the nutrition targets you want to track."}</p>
+          </div>
+        </div>
         <GoalSetupCard
           initialGoals={plateState.goals || PLATE_DEFAULT_GOALS}
           onCancel={editingGoals ? () => setEditingGoals(false) : null}
@@ -7115,31 +7122,40 @@ function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry }) {
 
   return (
     <div className="stack plate-content">
-      <Header eyebrow="Today’s Plate" title="Today’s Plate" subtitle="Your nutrition progress for today" />
-      <PlateDateControl dateKey={dateKey} todayKey={todayKey} setDateKey={setDateKey} />
+      <div className="plate-dashboard-header">
+        <div>
+          <span className="eyebrow">Daily nutrition</span>
+          <h1>Today's Plate</h1>
+          <p>{isToday ? "Your nutrition progress for today" : "Review your logged nutrition for this day"}</p>
+        </div>
+        <PlateDateControl dateKey={dateKey} todayKey={todayKey} setDateKey={setDateKey} />
+      </div>
       {!goals ? (
         <EmptyState title="No foods were logged on this day" copy="Use the previous arrow to review another day." />
       ) : (
         <>
-          <CalorieProgress total={totals.calories} goal={goals.calories} onOpen={() => setActiveNutrient("calories")} />
-          <section className="card plate-nutrient-card">
+          <CalorieProgress
+            total={totals.calories}
+            goal={goals.calories}
+            isToday={isToday}
+            onOpen={() => setActiveNutrient("calories")}
+            onEditGoals={isToday ? () => setEditingGoals(true) : null}
+          />
+          {partialNutrients.length > 0 && (
+            <div className="plate-data-note" role="status">
+              <Info size={17} />
+              <span><strong>Partial label data</strong>Some nutrient totals use only the values available for your logged foods.</span>
+            </div>
+          )}
+          <MacroDashboard totals={totals} goals={goals} entryCount={entries.length} onOpenNutrient={setActiveNutrient} />
+          <section className="card plate-nutrient-card plate-secondary-card">
             <div className="section-heading plate-section-heading">
-              <div><span className="eyebrow">Daily progress</span><h2>Macros</h2></div>
-              <Target size={20} />
+              <div><span className="eyebrow">Also tracking</span><h2>Daily goals and limits</h2></div>
+              <Droplets size={19} />
             </div>
-            <div className="plate-progress-list">
-              {["protein", "carbs", "fat"].map((nutrient) => (
-                <NutrientProgress key={nutrient} nutrient={nutrient} total={totals[nutrient]} goal={goals[nutrient]} onOpen={() => setActiveNutrient(nutrient)} />
-              ))}
-            </div>
-          </section>
-          <section className="card plate-nutrient-card">
-            <div className="section-heading plate-section-heading">
-              <div><span className="eyebrow">Also tracking</span><h2>Fiber, sugar, sodium</h2></div>
-            </div>
-            <div className="plate-progress-list">
+            <div className="plate-progress-list plate-secondary-list">
               {["fiber", "sugar", "sodium"].map((nutrient) => (
-                <NutrientProgress key={nutrient} nutrient={nutrient} total={totals[nutrient]} goal={goals[nutrient]} onOpen={() => setActiveNutrient(nutrient)} />
+                <NutrientProgress key={nutrient} nutrient={nutrient} total={totals[nutrient]} goal={goals[nutrient]} compact onOpen={() => setActiveNutrient(nutrient)} />
               ))}
             </div>
           </section>
@@ -7155,10 +7171,13 @@ function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry }) {
                 ))}
               </div>
             ) : (
-              <div className="plate-empty"><Utensils size={20} /><strong>Nothing added yet</strong><span>Scan or search for a food, then add a serving to Today’s Plate.</span></div>
+              <div className="plate-empty">
+                <span className="plate-empty-icon"><Utensils size={22} /></span>
+                <strong>Nothing added yet</strong>
+                <span>Scan or search for a food, then add a serving to Today's Plate.</span>
+              </div>
             )}
           </section>
-          {isToday && <button className="plate-edit-goals" onClick={() => setEditingGoals(true)}><Pencil size={16} />Edit goals</button>}
         </>
       )}
       {activeNutrient && (
@@ -7218,34 +7237,102 @@ function GoalSetupCard({ initialGoals, onSave, onCancel }) {
   );
 }
 
-function CalorieProgress({ total, goal, onOpen }) {
-  const consumed = total.total;
-  const progress = goal > 0 ? clamp((consumed / goal) * 100, 0, 100) : 0;
-  const remaining = goal - consumed;
+function CalorieProgress({ total, goal, isToday, onOpen, onEditGoals }) {
+  const state = nutrientProgressState(total, goal);
+  const consumed = state.total;
+  const remaining = hasNumber(consumed) ? goal - consumed : null;
+  const consumedCopy = hasNumber(consumed) ? formatNutrientValue(consumed, "calories") : "Missing";
+  const remainingCopy = !hasNumber(remaining)
+    ? "Daily total unavailable"
+    : remaining >= 0
+      ? `${formatNutrientValue(remaining, "calories")} kcal remaining`
+      : `${formatNutrientValue(Math.abs(remaining), "calories")} kcal over goal`;
   return (
-    <button className="card plate-calorie-card" onClick={onOpen} aria-label="View calorie contributions">
-      <div className="plate-calorie-ring" style={{ "--progress": `${progress * 3.6}deg` }} role="img" aria-label={`${formatNutrientValue(consumed, "calories")} of ${formatNutrientValue(goal, "calories")} kilocalories`}>
-        <div><strong>{formatNutrientValue(consumed, "calories")}</strong><span>of {formatNutrientValue(goal, "calories")} kcal</span></div>
+    <section className="card plate-calorie-card">
+      <div className="plate-calorie-heading">
+        <div><span className="eyebrow">Daily summary</span><h2>{isToday ? "Today's energy" : "Logged energy"}</h2></div>
+        {onEditGoals && <button type="button" onClick={onEditGoals}><Pencil size={15} />Edit goals</button>}
       </div>
-      <div className="plate-calorie-copy">
-        <span>Calories</span>
-        <strong>{remaining >= 0 ? `${formatNutrientValue(remaining, "calories")} kcal remaining` : `${formatNutrientValue(Math.abs(remaining), "calories")} kcal over goal`}</strong>
-        {total.missingCount > 0 && <small>Partial total · {total.missingCount} {total.missingCount === 1 ? "food is" : "foods are"} missing calorie data</small>}
+      <div className="plate-calorie-main">
+        <button className="plate-calorie-ring" style={{ "--progress": `${state.progress * 3.6}deg` }} onClick={onOpen} aria-label={`View calorie contributions. ${consumedCopy} of ${formatNutrientValue(goal, "calories")} kilocalories`}>
+          <div><strong>{consumedCopy}</strong><span>of {formatNutrientValue(goal, "calories")} kcal</span></div>
+        </button>
+        <div className="plate-calorie-copy">
+          <span>{hasNumber(consumed) ? "Remaining" : "Label data needed"}</span>
+          <strong>{remainingCopy}</strong>
+          <div className="plate-calorie-stats">
+            <span><small>Logged</small><b>{hasNumber(consumed) ? `${consumedCopy} kcal` : "Not available"}</b></span>
+            <span><small>Daily goal</small><b>{formatNutrientValue(goal, "calories")} kcal</b></span>
+          </div>
+          {total.missingCount > 0 && <small>Based on available label data · {total.missingCount} {total.missingCount === 1 ? "food is" : "foods are"} missing calories</small>}
+        </div>
       </div>
-    </button>
+    </section>
   );
 }
 
-function NutrientProgress({ nutrient, total, goal, onOpen }) {
-  const meta = PLATE_NUTRIENT_META[nutrient];
-  const progress = goal > 0 ? clamp((total.total / goal) * 100, 0, 100) : 0;
-  const remaining = Math.max(0, goal - total.total);
-  const over = Math.max(0, total.total - goal);
-  const progressCopy = over > 0 ? `${formatNutrientValue(over, nutrient)} ${meta.unit} over ${meta.goalWord}` : `${formatNutrientValue(remaining, nutrient)} ${meta.unit} remaining`;
+function MacroDashboard({ totals, goals, entryCount, onOpenNutrient }) {
+  const macros = buildMacroChartData(totals, goals);
   return (
-    <button className="plate-progress-row" onClick={onOpen} aria-label={`View ${meta.label} contributions`}>
-      <span className="plate-progress-copy"><strong>{meta.label}</strong><small>{formatNutrientValue(total.total, nutrient)} {meta.unit} of {formatNutrientValue(goal, nutrient)} {meta.unit} {meta.goalWord}</small></span>
-      <span className="plate-progress-track" aria-hidden="true"><i className={`nutrient-${meta.tone}`} style={{ width: `${progress}%` }} /></span>
+    <section className="card plate-macro-card">
+      <div className="section-heading plate-section-heading">
+        <div><span className="eyebrow">Macro balance</span><h2>Protein, carbs and fat</h2></div>
+        <Target size={19} />
+      </div>
+      <div className="plate-macro-visual">
+        <MacroProgressChart macros={macros} entryCount={entryCount} />
+        <div className="plate-macro-legend" aria-hidden="true">
+          {macros.map((macro) => (
+            <div key={macro.nutrient}>
+              <i className={`nutrient-${macro.tone}`} />
+              <span><strong>{macro.shortLabel || macro.label}</strong><small>{hasNumber(macro.total) ? `${formatNutrientValue(macro.total, macro.nutrient)} of ${formatNutrientValue(macro.goal, macro.nutrient)} ${macro.unit}` : "Missing label data"}</small></span>
+              <b>{Math.round(macro.progress)}%</b>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="plate-progress-list plate-macro-rows">
+        {PLATE_MACROS.map((nutrient) => (
+          <NutrientProgress key={nutrient} nutrient={nutrient} total={totals[nutrient]} goal={goals[nutrient]} onOpen={() => onOpenNutrient(nutrient)} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MacroProgressChart({ macros, entryCount }) {
+  const radii = [50, 38, 26];
+  const description = macros.map((macro) => `${macro.label} ${Math.round(macro.progress)} percent`).join(", ");
+  return (
+    <div className="plate-macro-chart" role="img" aria-label={`Macro progress: ${description}`}>
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        {macros.map((macro, index) => (
+          <g key={macro.nutrient} className={`macro-ring macro-ring-${macro.tone}`}>
+            <circle className="macro-ring-track" cx="60" cy="60" r={radii[index]} pathLength="100" />
+            <circle className="macro-ring-value" cx="60" cy="60" r={radii[index]} pathLength="100" strokeDasharray="100" strokeDashoffset={100 - macro.progress} />
+          </g>
+        ))}
+      </svg>
+      <span><strong>{entryCount}</strong><small>{entryCount === 1 ? "food logged" : "foods logged"}</small></span>
+    </div>
+  );
+}
+
+function NutrientProgress({ nutrient, total, goal, onOpen, compact = false }) {
+  const meta = PLATE_NUTRIENT_META[nutrient];
+  const state = nutrientProgressState(total, goal);
+  const remaining = hasNumber(state.total) ? Math.max(0, goal - state.total) : null;
+  const over = hasNumber(state.total) ? Math.max(0, state.total - goal) : 0;
+  const totalCopy = hasNumber(state.total) ? `${formatNutrientValue(state.total, nutrient)} ${meta.unit}` : "Missing";
+  const progressCopy = !hasNumber(state.total)
+    ? "Label data needed"
+    : over > 0
+      ? `${formatNutrientValue(over, nutrient)} ${meta.unit} over ${meta.goalWord}`
+      : `${formatNutrientValue(remaining, nutrient)} ${meta.unit} remaining`;
+  return (
+    <button className={`plate-progress-row${compact ? " is-compact" : ""}`} onClick={onOpen} aria-label={`View ${meta.label} contributions`}>
+      <span className="plate-progress-copy"><strong><i className={`nutrient-dot nutrient-${meta.tone}`} />{meta.label}</strong><small>{totalCopy} of {formatNutrientValue(goal, nutrient)} {meta.unit} {meta.goalWord}</small></span>
+      <span className="plate-progress-track" aria-hidden="true"><i className={`nutrient-${meta.tone}`} style={{ width: `${state.progress}%` }} /></span>
       <span className="plate-progress-meta"><small>{progressCopy}</small>{total.missingCount > 0 && <em>Partial total</em>}</span>
       <ChevronRight size={17} />
     </button>
@@ -7253,10 +7340,14 @@ function NutrientProgress({ nutrient, total, goal, onOpen }) {
 }
 
 function DailyFoodRow({ entry, onClick }) {
+  const serving = formatPlateServing(entry);
   return (
     <button className="plate-food-row" onClick={onClick}>
       <ProductImage product={entry.product} alt={entry.product.name} />
-      <span><strong>{entry.product.name}</strong><small>{formatPlateServing(entry)}</small></span>
+      <span>
+        <strong>{entry.product.name}</strong>
+        <small>{entry.product.brand ? `${entry.product.brand} · ${serving}` : serving}</small>
+      </span>
       <span className="plate-food-calories">{hasNumber(entry.contribution.calories) ? `${formatNutrientValue(entry.contribution.calories, "calories")} kcal` : "Calories missing"}</span>
       <ChevronRight size={17} />
     </button>
@@ -7271,13 +7362,14 @@ function formatPlateServing(entry) {
 
 function NutrientDetailSheet({ nutrient, total, goal, entries, onClose }) {
   const meta = PLATE_NUTRIENT_META[nutrient];
+  const state = nutrientProgressState(total, goal);
   const contributors = entries.filter((entry) => hasNumber(entry.contribution?.[nutrient]));
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <section className="ingredient-sheet plate-detail-sheet" role="dialog" aria-modal="true" aria-label={`${meta.label} contributions`} onClick={(event) => event.stopPropagation()}>
         <div className="sheet-handle" />
         <div className="sheet-header"><div><span className="eyebrow">Today’s Plate</span><h2 className="nutrient-sheet-title"><i className={`nutrient-dot nutrient-${meta.tone}`} />{meta.label}</h2></div><button onClick={onClose} aria-label="Close"><X size={20} /></button></div>
-        <div className="plate-detail-total"><strong>{formatNutrientValue(total.total, nutrient)} {meta.unit}</strong><span>of {formatNutrientValue(goal, nutrient)} {meta.unit} {meta.goalWord}</span></div>
+        <div className="plate-detail-total"><strong>{hasNumber(state.total) ? `${formatNutrientValue(state.total, nutrient)} ${meta.unit}` : "Missing"}</strong><span>of {formatNutrientValue(goal, nutrient)} {meta.unit} {meta.goalWord}</span></div>
         <div className="plate-contributor-list">
           {contributors.map((entry) => <div key={entry.id}><span>{entry.product.name}</span><strong>{formatNutrientValue(entry.contribution[nutrient], nutrient)} {meta.unit}</strong></div>)}
         </div>
@@ -7309,9 +7401,10 @@ function HistoryGroup({ title, items, productIndex, onOpenProduct }) {
   );
 }
 
-function ProfileScreen({ profile, onChange, onBack, dailyTotals, dailyLog, goals, onSaveGoals, account }) {
+function ProfileScreen({ profile, onChange, onBack, dailyTotals, plateTotals, dailyLog, goals, onSaveGoals, account }) {
   const [customAllergy, setCustomAllergy] = useState("");
   const [editingGoals, setEditingGoals] = useState(false);
+  const [openPreference, setOpenPreference] = useState(null);
 
   function toggleAllergy(item) {
     const normalized = normalizeAllergyPreference(item);
@@ -7362,6 +7455,14 @@ function ProfileScreen({ profile, onChange, onBack, dailyTotals, dailyLog, goals
   const customAllergies = profile.allergies.filter((item) => !COMMON_ALLERGIES.some((common) => common.key === item.key));
   const effectiveGoals = goals || profile.todayPlateGoals;
   const calorieGoal = effectiveGoals?.calories;
+  const regionLabel = PRODUCT_REGIONS.find((item) => item.id === profile.productRegion)?.label || "Global";
+  const labelWatchCount = profile.allergies.length + profile.avoidedIngredients.length + profile.watchlistIngredients.length;
+  const calorieTotalIsMissing = plateTotals?.calories?.missingCount > 0 && plateTotals?.calories?.knownCount === 0;
+  const calorieTotalCopy = calorieTotalIsMissing ? "Partial" : `${Math.round(dailyTotals.calories).toLocaleString()} kcal`;
+
+  function togglePreference(id) {
+    setOpenPreference((current) => current === id ? null : id);
+  }
 
   return (
     <div className="stack profile-screen">
@@ -7375,127 +7476,26 @@ function ProfileScreen({ profile, onChange, onBack, dailyTotals, dailyLog, goals
         )}
       />
 
+      <section className="profile-overview" aria-label="Profile summary">
+        <div><span><Bell size={17} /></span><small>Label watches</small><strong>{labelWatchCount}</strong></div>
+        <div><span><Target size={17} /></span><small>Daily goal</small><strong>{hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Not set"}</strong></div>
+        <div><span><ShoppingBag size={17} /></span><small>Market</small><strong>{regionLabel}</strong></div>
+      </section>
+
       <AccountProfileCard account={account} />
 
-      <section className="card profile-section-card">
-        <div className="profile-section-heading">
-          <span><AlertTriangle size={18} /></span>
-          <div><h2>Allergies</h2><p>Products with a clear match get a high-priority personal alert.</p></div>
-        </div>
-        <div className="profile-choice-grid" role="group" aria-label="Common allergies">
-          {COMMON_ALLERGIES.map((item) => (
-            <button
-              key={item.key}
-              className={selectedCommonAllergies.has(item.key) ? "selected" : ""}
-              aria-pressed={selectedCommonAllergies.has(item.key)}
-              onClick={() => toggleAllergy(item)}
-            >
-              {selectedCommonAllergies.has(item.key) && <Check size={15} />}
-              {item.label}
-            </button>
-          ))}
-        </div>
-        {customAllergies.length > 0 && (
-          <div className="profile-tag-list" aria-label="Custom allergies">
-            {customAllergies.map((item) => (
-              <button key={item.key} onClick={() => toggleAllergy(item)} aria-label={`Remove ${item.label}`}>
-                {item.label}<X size={14} />
-              </button>
-            ))}
-          </div>
-        )}
-        <form className="profile-add-form" onSubmit={addCustomAllergy}>
-          <input value={customAllergy} onChange={(event) => setCustomAllergy(event.target.value)} placeholder="Add another allergy" maxLength={80} aria-label="Custom allergy" />
-          <button type="submit" aria-label="Add allergy"><Plus size={18} /></button>
-        </form>
-      </section>
-
-      <section className="card profile-section-card">
-        <div className="profile-section-heading">
-          <span><Leaf size={18} /></span>
-          <div><h2>Diet preferences</h2><p>Ziya checks clear conflicts and stays cautious when labels are incomplete.</p></div>
-        </div>
-        <div className="profile-choice-grid" role="group" aria-label="Diet preferences">
-          {DIET_PREFERENCES.map((item) => {
-            const selected = profile.dietPreferences.includes(item.key);
-            return (
-              <button key={item.key} className={selected ? "selected" : ""} aria-pressed={selected} onClick={() => toggleDietPreference(item.key)}>
-                {selected && <Check size={15} />}{item.label}
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="card profile-section-card">
-        <div className="profile-section-heading">
-          <span><Bell size={18} /></span>
-          <div><h2>Ingredient alerts</h2><p>Aliases and E-numbers are matched through Ziya's ingredient knowledge.</p></div>
-        </div>
-        <ProfileIngredientEditor
-          title="Avoided ingredients"
-          copy="Shown as a personal avoid-list alert."
-          items={profile.avoidedIngredients}
-          placeholder="Try Red 40 or E129"
-          onAdd={(value) => updateIngredientList("avoidedIngredients", value)}
-          onRemove={(value) => updateIngredientList("avoidedIngredients", value, true)}
-        />
-        <ProfileIngredientEditor
-          title="Watchlist"
-          copy="Shown as information, not a danger warning."
-          items={profile.watchlistIngredients}
-          placeholder="Try carrageenan"
-          onAdd={(value) => updateIngredientList("watchlistIngredients", value)}
-          onRemove={(value) => updateIngredientList("watchlistIngredients", value, true)}
-        />
-      </section>
-
-      <section className="card profile-section-card">
-        <div className="profile-section-heading">
-          <span><Languages size={18} /></span>
-          <div><h2>App preferences</h2><p>Choose your preferred product market and how recognized label ingredients appear.</p></div>
-        </div>
-        <div className="profile-select-grid">
-          <label>
-            <span>Language</span>
-            <select value={profile.preferredLanguage} onChange={(event) => onChange({ preferredLanguage: event.target.value })}>
-              {PROFILE_LANGUAGES.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Units</span>
-            <select value={profile.unitSystem} onChange={(event) => onChange({ unitSystem: event.target.value })}>
-              {PROFILE_UNITS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Product region</span>
-            <select value={profile.productRegion} onChange={(event) => onChange({ productRegion: event.target.value })}>
-              {PRODUCT_REGIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-            </select>
-            <small>Preferred sold-in market, not guaranteed origin.</small>
-          </label>
-          <label>
-            <span>Ingredient display</span>
-            <select value={profile.ingredientDisplayMode} onChange={(event) => onChange({ ingredientDisplayMode: event.target.value })}>
-              {INGREDIENT_DISPLAY_MODES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-            </select>
-          </label>
-        </div>
-      </section>
-
       <section className="card profile-section-card profile-goals-card">
-        <div className="profile-section-heading">
+        <div className="profile-section-heading profile-dashboard-heading">
           <span><Target size={18} /></span>
-          <div><h2>Today's Plate goals</h2><p>These are your editable targets, not medical recommendations.</p></div>
+          <div><span className="eyebrow">Daily goals</span><h2>Today's Plate</h2><p>Editable targets for the nutrients you choose to track.</p></div>
         </div>
         <div className="profile-goal-summary">
-          <span><small>Calories</small><strong>{hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Not set"}</strong></span>
-          <span><small>Eaten today</small><strong>{Math.round(dailyTotals.calories).toLocaleString()} kcal</strong></span>
+          <span><small>Calorie goal</small><strong>{hasNumber(calorieGoal) ? `${calorieGoal.toLocaleString()} kcal` : "Not set"}</strong></span>
+          <span><small>Logged today</small><strong>{calorieTotalCopy}</strong></span>
           <span><small>Foods today</small><strong>{dailyLog.length}</strong></span>
         </div>
         <button className="profile-edit-goals" onClick={() => setEditingGoals((current) => !current)}>
-          <Pencil size={17} />{editingGoals ? "Close goal editor" : "Edit goals"}<ChevronRight size={17} />
+          <Pencil size={17} />{editingGoals ? "Close goal editor" : "Edit daily goals"}<ChevronRight size={17} />
         </button>
       </section>
 
@@ -7508,6 +7508,159 @@ function ProfileScreen({ profile, onChange, onBack, dailyTotals, dailyLog, goals
           }}
         />
       )}
+
+      <section className="card profile-section-card profile-watch-card">
+        <div className="profile-section-heading profile-dashboard-heading">
+          <span><Bell size={18} /></span>
+          <div><span className="eyebrow">Personalization</span><h2>Label Watch</h2><p>Flags matches in available label data. Always verify the physical package.</p></div>
+        </div>
+        <div className="profile-preference-list">
+          <ProfilePreferencePanel
+            icon={<AlertTriangle size={17} />}
+            title="Allergies"
+            summary={profile.allergies.length ? `${profile.allergies.length} watched` : "None added"}
+            open={openPreference === "allergies"}
+            onToggle={() => togglePreference("allergies")}
+          >
+            <p className="profile-panel-note">Matches appear as high-priority watches based on available label data.</p>
+            <div className="profile-choice-grid" role="group" aria-label="Common allergies">
+              {COMMON_ALLERGIES.map((item) => (
+                <button
+                  key={item.key}
+                  className={selectedCommonAllergies.has(item.key) ? "selected" : ""}
+                  aria-pressed={selectedCommonAllergies.has(item.key)}
+                  onClick={() => toggleAllergy(item)}
+                >
+                  {selectedCommonAllergies.has(item.key) && <Check size={15} />}
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            {customAllergies.length > 0 && (
+              <div className="profile-tag-list" aria-label="Custom allergies">
+                {customAllergies.map((item) => (
+                  <button key={item.key} onClick={() => toggleAllergy(item)} aria-label={`Remove ${item.label}`}>
+                    {item.label}<X size={14} />
+                  </button>
+                ))}
+              </div>
+            )}
+            <form className="profile-add-form" onSubmit={addCustomAllergy}>
+              <input value={customAllergy} onChange={(event) => setCustomAllergy(event.target.value)} placeholder="Add another allergy" maxLength={80} aria-label="Custom allergy" />
+              <button type="submit" aria-label="Add allergy"><Plus size={18} /></button>
+            </form>
+          </ProfilePreferencePanel>
+
+          <ProfilePreferencePanel
+            icon={<Leaf size={17} />}
+            title="Diet preferences"
+            summary={profile.dietPreferences.length ? `${profile.dietPreferences.length} selected` : "None selected"}
+            open={openPreference === "diet"}
+            onToggle={() => togglePreference("diet")}
+          >
+            <p className="profile-panel-note">Clear conflicts are flagged cautiously when enough label data is available.</p>
+            <div className="profile-choice-grid" role="group" aria-label="Diet preferences">
+              {DIET_PREFERENCES.map((item) => {
+                const selected = profile.dietPreferences.includes(item.key);
+                return (
+                  <button key={item.key} className={selected ? "selected" : ""} aria-pressed={selected} onClick={() => toggleDietPreference(item.key)}>
+                    {selected && <Check size={15} />}{item.label}
+                  </button>
+                );
+              })}
+            </div>
+          </ProfilePreferencePanel>
+
+          <ProfilePreferencePanel
+            icon={<ShieldCheck size={17} />}
+            title="Avoided ingredients"
+            summary={profile.avoidedIngredients.length ? `${profile.avoidedIngredients.length} added` : "None added"}
+            open={openPreference === "avoid"}
+            onToggle={() => togglePreference("avoid")}
+          >
+            <ProfileIngredientEditor
+              title="Avoid list"
+              copy="Aliases and E-numbers are matched through Ziya's ingredient knowledge."
+              items={profile.avoidedIngredients}
+              placeholder="Try Red 40 or E129"
+              onAdd={(value) => updateIngredientList("avoidedIngredients", value)}
+              onRemove={(value) => updateIngredientList("avoidedIngredients", value, true)}
+            />
+          </ProfilePreferencePanel>
+
+          <ProfilePreferencePanel
+            icon={<BookOpen size={17} />}
+            title="Ingredient watchlist"
+            summary={profile.watchlistIngredients.length ? `${profile.watchlistIngredients.length} watched` : "None added"}
+            open={openPreference === "watchlist"}
+            onToggle={() => togglePreference("watchlist")}
+          >
+            <ProfileIngredientEditor
+              title="Watchlist"
+              copy="Informational matches only, not a danger warning."
+              items={profile.watchlistIngredients}
+              placeholder="Try carrageenan"
+              onAdd={(value) => updateIngredientList("watchlistIngredients", value)}
+              onRemove={(value) => updateIngredientList("watchlistIngredients", value, true)}
+            />
+          </ProfilePreferencePanel>
+        </div>
+      </section>
+
+      <section className="card profile-section-card profile-settings-card">
+        <div className="profile-section-heading profile-dashboard-heading">
+          <span><ShoppingBag size={18} /></span>
+          <div><span className="eyebrow">Product preferences</span><h2>Market and labels</h2><p>Control which product market is preferred and how recognized ingredients appear.</p></div>
+        </div>
+        <div className="profile-settings-list">
+          <label className="profile-setting-row">
+            <span><strong>Product region</strong><small>Preferred sold-in market, not guaranteed origin.</small></span>
+            <select value={profile.productRegion} onChange={(event) => onChange({ productRegion: event.target.value })}>
+              {PRODUCT_REGIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </label>
+          <label className="profile-setting-row">
+            <span><strong>Ingredient display</strong><small>Choose translated, original, or both names.</small></span>
+            <select value={profile.ingredientDisplayMode} onChange={(event) => onChange({ ingredientDisplayMode: event.target.value })}>
+              {INGREDIENT_DISPLAY_MODES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section className="card profile-section-card profile-settings-card">
+        <div className="profile-section-heading profile-dashboard-heading">
+          <span><Languages size={18} /></span>
+          <div><span className="eyebrow">Display preferences</span><h2>Language and units</h2><p>Stored for label analysis and familiar measurements.</p></div>
+        </div>
+        <div className="profile-settings-list">
+          <label className="profile-setting-row">
+            <span><strong>Language</strong><small>Analysis remains in English in this version.</small></span>
+            <select value={profile.preferredLanguage} onChange={(event) => onChange({ preferredLanguage: event.target.value })}>
+              {PROFILE_LANGUAGES.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+            </select>
+          </label>
+          <label className="profile-setting-row">
+            <span><strong>Units</strong><small>Used where conversion is supported.</small></span>
+            <select value={profile.unitSystem} onChange={(event) => onChange({ unitSystem: event.target.value })}>
+              {PROFILE_UNITS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+            </select>
+          </label>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProfilePreferencePanel({ icon, title, summary, open, onToggle, children }) {
+  return (
+    <div className={`profile-preference-panel${open ? " is-open" : ""}`}>
+      <button className="profile-preference-trigger" type="button" aria-expanded={open} onClick={onToggle}>
+        <span className="profile-preference-icon">{icon}</span>
+        <span><strong>{title}</strong><small>{summary}</small></span>
+        <ChevronDown size={18} />
+      </button>
+      {open && <div className="profile-preference-content">{children}</div>}
     </div>
   );
 }
@@ -7529,11 +7682,12 @@ function AccountProfileCard({ account }) {
 
   return (
     <section className="card profile-section-card account-profile-card">
-      <div className="profile-section-heading">
-        <span>{signedIn ? <Cloud size={18} /> : <User size={18} />}</span>
+      <div className="profile-account-summary">
+        <span className="profile-account-avatar">{signedIn ? <Cloud size={20} /> : <User size={20} />}</span>
         <div>
+          <span className="eyebrow">Account</span>
           <h2>{signedIn ? "Signed in" : "Local profile"}</h2>
-          <p>{signedIn ? account.session.user.email || "Your Ziya account" : "Continue without an account. Your profile stays on this device."}</p>
+          <p>{signedIn ? account.session.user.email || "Your Ziya account" : "Your preferences stay on this device."}</p>
         </div>
         <em className={`sync-status sync-status-${account.syncStatus.toLowerCase().replace(/\s+/g, "-")}`}>
           {account.syncStatus === "Synced" ? <Cloud size={14} /> : <CloudOff size={14} />}{account.syncStatus}
@@ -7554,7 +7708,7 @@ function AccountProfileCard({ account }) {
             </div>
           )}
           {!account.syncConsentPending && (
-            <button className="secondary-button" onClick={account.onSync} disabled={account.syncStatus === "Syncing"}>
+            <button className="secondary-button account-sync-button" onClick={account.onSync} disabled={account.syncStatus === "Syncing"}>
               <RefreshCw size={17} />{account.syncStatus === "Syncing" ? "Syncing..." : "Sync now"}
             </button>
           )}
@@ -7562,7 +7716,7 @@ function AccountProfileCard({ account }) {
         </div>
       ) : (
         <div className="account-sign-in">
-          <div><span className="eyebrow">Optional</span><strong>Sign in to sync your data</strong><p>Scanning, reports, and Today's Plate keep working without an account.</p></div>
+          <div><span className="eyebrow">Optional sync</span><strong>Keep your profile across devices</strong><p>Your scanner, reports, and Today's Plate keep working without an account.</p></div>
           <form onSubmit={submitMagicLink}>
             <label htmlFor="profile-email">Email</label>
             <div><Mail size={18} /><input id="profile-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required /><button type="submit" disabled={sending}>{sending ? "Sending" : "Send link"}</button></div>
@@ -7970,6 +8124,7 @@ function InfoBlock({ label, value }) {
 
 export {
   applyStoredProductOverride,
+  buildMacroChartData,
   calculateDailyTotals,
   completeProductWithUserInput,
   createManualReport,
@@ -7985,6 +8140,7 @@ export {
   normalizeNutrition,
   normalizeNutritionForServing,
   parseOpenFoodFactsIngredients,
+  PLATE_DEFAULT_GOALS,
   searchFoodProductsByName,
   sanitizePlateGoals,
   shiftLocalDateKey,

@@ -4,11 +4,13 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test:data-quality": "node scripts/run-data-quality-tests.cjs",
+    "test:plate-profile": "node scripts/test-plate-profile.cjs",
     "test:profile": "node scripts/run-profile-tests.cjs",
     "test:ingredient-parser": "node scripts/test-ingredient-parser.cjs",
     "test:ingredient-coverage": "node scripts/test-ingredient-coverage.cjs",
     "test:multilingual-ingredients": "node scripts/test-multilingual-ingredients.cjs",
-    "test:region-search": "node scripts/test-region-search.cjs"
+    "test:region-search": "node scripts/test-region-search.cjs",
+    "test:better-matches": "node scripts/test-better-matches.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.2",
