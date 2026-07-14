@@ -3122,14 +3122,6 @@ button {
   pointer-events: none;
 }
 
-.scanner-sheet-dismiss-layer {
-  position: absolute;
-  z-index: 3;
-  inset: 0;
-  border: 0;
-  background: transparent;
-}
-
 .scanner-diagnostics button {
   pointer-events: auto;
 }
@@ -3246,14 +3238,53 @@ button {
   pointer-events: none;
 }
 
+.scanner-live.has-sheet {
+  z-index: 3500;
+}
+
+body.scan-sheet-open .bottom-nav {
+  pointer-events: none;
+}
+
+.scanner-sheet-backdrop {
+  position: fixed;
+  z-index: 7;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: rgba(5, 10, 7, 0.18);
+  opacity: 1;
+  cursor: default;
+  -webkit-backdrop-filter: blur(1.5px);
+  backdrop-filter: blur(1.5px);
+  animation: scannerBackdropEnter 0.22s ease-out both;
+  transition: background 0.24s ease, opacity 0.24s ease;
+}
+
+.scanner-sheet-backdrop-full {
+  background: rgba(5, 10, 7, 0.34);
+}
+
+@keyframes scannerBackdropEnter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .scanner-sheet {
-  position: absolute;
+  --sheet-top: max(74px, calc(env(safe-area-inset-top, 0px) + 60px));
+  --sheet-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --sheet-peek-height: calc(116px + var(--sheet-safe-bottom));
+  --sheet-mid-height: min(calc(370px + var(--sheet-safe-bottom)), calc(100% - 12px));
+  --sheet-snap-y: 0px;
+  position: fixed;
   z-index: 8;
-  left: 10px;
-  right: 10px;
-  bottom: calc(var(--nav-bottom) + var(--nav-height) + 10px);
+  top: var(--sheet-top);
+  right: 0;
+  bottom: 0;
+  left: 0;
   border: 1px solid rgba(255, 255, 255, 0.82);
-  border-radius: 28px;
+  border-bottom: 0;
+  border-radius: 30px 30px 0 0;
   background: rgba(253, 254, 253, 0.94);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
@@ -3261,33 +3292,38 @@ button {
   -webkit-backdrop-filter: blur(28px) saturate(1.35);
   backdrop-filter: blur(28px) saturate(1.35);
   overflow: hidden;
-  will-change: transform, opacity;
+  transform: translate3d(0, var(--sheet-drag-y, var(--sheet-snap-y)), 0);
+  will-change: transform;
   animation: scannerSheetEnter 0.29s cubic-bezier(0.2, 0.92, 0.28, 1.08) both;
   transition:
-    top 0.28s cubic-bezier(0.22, 0.8, 0.26, 1),
-    bottom 0.28s cubic-bezier(0.22, 0.8, 0.26, 1),
-    max-height 0.28s cubic-bezier(0.22, 0.8, 0.26, 1),
-    border-radius 0.22s ease,
-    transform 0.28s cubic-bezier(0.22, 0.8, 0.26, 1);
+    transform 0.29s cubic-bezier(0.22, 0.82, 0.24, 1),
+    box-shadow 0.22s ease;
+}
+
+.scanner-sheet[data-dragging="true"] {
+  animation: none;
+  transition: none;
+  cursor: grabbing;
+  user-select: none;
+}
+
+.scanner-sheet[data-closing="true"] {
+  pointer-events: none;
 }
 
 @keyframes scannerSheetEnter {
   0% {
     opacity: 0;
-    transform: translateY(44px) scale(0.985);
-  }
-  72% {
-    opacity: 1;
-    transform: translateY(-2px) scale(1);
+    transform: translate3d(0, calc(var(--sheet-snap-y) + 38px), 0);
   }
   100% {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translate3d(0, var(--sheet-snap-y), 0);
   }
 }
 
 .scanner-sheet-peek {
-  max-height: 116px;
+  --sheet-snap-y: calc(100% - var(--sheet-peek-height));
   background: rgba(255, 255, 255, 0.97);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.94),
@@ -3295,32 +3331,45 @@ button {
 }
 
 .scanner-sheet-mid {
-  max-height: 348px;
+  --sheet-snap-y: calc(100% - var(--sheet-mid-height));
 }
 
 .scanner-sheet-full {
-  top: calc(74px + env(safe-area-inset-top, 0px));
-  bottom: calc(var(--nav-bottom) + var(--nav-height) + 10px);
-  max-height: none;
-  border-radius: 28px;
+  --sheet-snap-y: 0px;
 }
 
 .scanner-sheet-full .sheet-grabber {
-  height: 34px;
+  height: 36px;
 }
 
 .scanner-sheet-full .scanner-sheet-scroll {
-  height: calc(100% - 34px);
+  height: calc(100% - 36px);
+}
+
+.sheet-snap-measure {
+  position: absolute;
+  width: 1px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.sheet-snap-measure-peek {
+  height: var(--sheet-peek-height);
+}
+
+.sheet-snap-measure-mid {
+  height: var(--sheet-mid-height);
 }
 
 .sheet-grabber {
   width: 100%;
-  height: 20px;
+  height: 36px;
   border: 0;
   display: grid;
   place-items: center;
   background: transparent;
-  cursor: ns-resize;
+  cursor: grab;
+  touch-action: none;
 }
 
 .sheet-grabber span {
@@ -3352,7 +3401,7 @@ button {
   gap: 13px;
   align-items: center;
   border: 0;
-  padding: 0 16px 16px;
+  padding: 0 16px max(16px, var(--sheet-safe-bottom));
   color: inherit;
   background: transparent;
   text-align: left;
@@ -3522,12 +3571,13 @@ button {
 }
 
 .scanner-sheet-scroll {
-  height: calc(100% - 20px);
+  height: calc(100% - 36px);
   overflow-y: auto;
-  padding: 0 14px calc(24px + var(--nav-height));
+  padding: 0 14px max(24px, var(--sheet-safe-bottom));
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
+  touch-action: pan-y;
   animation: reportSheetReveal 0.24s ease-out both;
 }
 
@@ -3548,6 +3598,7 @@ button {
 
 .scanner-sheet-scroll .report-screen {
   padding-top: 4px;
+  padding-bottom: max(24px, var(--sheet-safe-bottom));
 }
 
 /* Product reports use one quiet, predictable rhythm across every category. */
@@ -4026,20 +4077,21 @@ button {
 }
 
 .scanner-sheet-mid .scanner-fallback-sheet {
-  max-height: 338px;
+  max-height: calc(var(--sheet-mid-height) - 36px);
   overflow-y: auto;
 }
 
 .scanner-sheet-full .scanner-fallback-sheet {
-  max-height: calc(100% - 22px);
+  max-height: calc(100% - 36px);
   overflow-y: auto;
-  padding-bottom: calc(24px + var(--nav-height));
+  padding-bottom: max(24px, var(--sheet-safe-bottom));
 }
 
 .scanner-fallback-sheet {
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
+  touch-action: pan-y;
 }
 
 .scanner-fallback-sheet::-webkit-scrollbar {
@@ -4056,6 +4108,7 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   .scanner-sheet,
+  .scanner-sheet-backdrop,
   .scanner-sheet-scroll,
   .scanner-fallback-panel,
   .manual-inline-panel,

@@ -3506,6 +3506,7 @@ function ScanScreen({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [diagnosticsVersion, setDiagnosticsVersion] = useState(0);
   const [debugCropCaptures, setDebugCropCaptures] = useState([]);
+  const sheetActive = Boolean(sheetMode);
   const scannerLiveRef = useRef(null);
   const scanFrameRef = useRef(null);
   const videoRef = useRef(null);
@@ -3533,7 +3534,6 @@ function ScanScreen({
   const lastDiagnosticRenderRef = useRef(0);
   const lastDecoderCropSignatureRef = useRef("");
   const mountedRef = useRef(true);
-  const dragStartY = useRef(null);
   const debugEnabled = useMemo(
     () => new URLSearchParams(window.location.search).get("scannerDebug") === "1",
     []
@@ -3912,6 +3912,31 @@ function ScanScreen({
     setSheetProduct(updatedProduct);
     setManualProduct(updatedProduct);
   }, [activeFallback, capturedPhoto, sheetProduct]);
+
+  useEffect(() => {
+    if (!sheetActive) return undefined;
+    const bottomNav = document.querySelector(".bottom-nav");
+    document.body.classList.add("scan-sheet-open");
+    bottomNav?.setAttribute("inert", "");
+    bottomNav?.setAttribute("aria-hidden", "true");
+    return () => {
+      document.body.classList.remove("scan-sheet-open");
+      bottomNav?.removeAttribute("inert");
+      bottomNav?.removeAttribute("aria-hidden");
+    };
+  }, [sheetActive]);
+
+  useEffect(() => {
+    if (!sheetActive) return undefined;
+    function handleSheetEscape(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (sheetState === "full") collapseSheet();
+      else dismissSheet();
+    }
+    window.addEventListener("keydown", handleSheetEscape);
+    return () => window.removeEventListener("keydown", handleSheetEscape);
+  }, [sheetActive, sheetState]);
 
   function isPlausibleScannerBarcode(value) {
     return value.length >= 4 && value.length <= 64 && /^[\dA-Za-z]+$/.test(value);
@@ -4767,10 +4792,6 @@ function ScanScreen({
     setActiveFallback(null);
   }
 
-  function expandSheet() {
-    updateSheetState((current) => (current === "peek" ? "mid" : "full"));
-  }
-
   function resumeDetection() {
     if (cameraStatus !== "active") {
       setCameraMessage(
@@ -4816,22 +4837,8 @@ function ScanScreen({
     dismissSheet();
   }
 
-  function handleSheetPointerDown(event) {
-    dragStartY.current = event.clientY;
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-  }
-
-  function handleSheetPointerUp(event) {
-    if (dragStartY.current == null) return;
-    const delta = event.clientY - dragStartY.current;
-    dragStartY.current = null;
-    if (Math.abs(delta) > 38) event.currentTarget.dataset.dragged = "true";
-    if (delta < -38) expandSheet();
-    if (delta > 38) collapseSheet();
-  }
-
   return (
-    <div className="scanner-live" ref={scannerLiveRef}>
+    <div className={`scanner-live ${sheetActive ? "has-sheet" : ""}`} ref={scannerLiveRef}>
       <video
         ref={videoRef}
         autoPlay
@@ -4846,10 +4853,6 @@ function ScanScreen({
       />
       <div className="scanner-fallback-bg" />
       <div className="scanner-shade" />
-      {sheetMode === "product" && sheetState === "peek" && (
-        <button className="scanner-sheet-dismiss-layer" onClick={dismissSheet} aria-label="Dismiss scan result" />
-      )}
-
       <div className="scanner-top-controls">
         <button className={`glass-circle ${flashOn ? "is-on" : ""}`} onClick={toggleFlash} aria-label="Toggle flashlight">
           <Flashlight size={21} />
@@ -4954,8 +4957,7 @@ function ScanScreen({
         setMessageTone={setMessageTone}
         copied={copied}
         setCopied={setCopied}
-        onPointerDown={handleSheetPointerDown}
-        onPointerUp={handleSheetPointerUp}
+        onDismiss={dismissSheet}
         barcode={barcode}
         setBarcode={setBarcode}
         lookupLoading={lookupLoading}
@@ -5040,8 +5042,7 @@ function ScannerBottomSheet({
   setMessageTone,
   copied,
   setCopied,
-  onPointerDown,
-  onPointerUp,
+  onDismiss,
   barcode,
   setBarcode,
   lookupLoading,
@@ -5064,9 +5065,194 @@ function ScannerBottomSheet({
   useSampleProduct,
   personalProfile
 }) {
+  const sheetRef = useRef(null);
+  const dragRef = useRef({ active: false });
+  const dragFrameRef = useRef(null);
+  const queuedTranslateRef = useRef(null);
+  const snapTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (dragFrameRef.current) window.cancelAnimationFrame(dragFrameRef.current);
+    if (snapTimerRef.current) window.clearTimeout(snapTimerRef.current);
+  }, []);
+
   if (!mode) return null;
   const isProduct = mode === "product" && product;
   const canPeek = isProduct;
+
+  function clamp(value, minimum, maximum) {
+    return Math.min(maximum, Math.max(minimum, value));
+  }
+
+  function getSnapPoints() {
+    const element = sheetRef.current;
+    if (!element) return [];
+    const sheetHeight = element.getBoundingClientRect().height;
+    const peekHeight = element.querySelector('[data-snap-measure="peek"]')?.offsetHeight || 116;
+    const midHeight = element.querySelector('[data-snap-measure="mid"]')?.offsetHeight || 370;
+    const points = [
+      { state: "full", translate: 0 },
+      { state: "mid", translate: Math.max(0, sheetHeight - Math.min(sheetHeight, midHeight)) }
+    ];
+    if (canPeek) points.push({ state: "peek", translate: Math.max(0, sheetHeight - Math.min(sheetHeight, peekHeight)) });
+    points.push({ state: "closed", translate: sheetHeight + 8 });
+    return points;
+  }
+
+  function readCurrentTranslate(element) {
+    const transform = window.getComputedStyle(element).transform;
+    if (!transform || transform === "none") {
+      return getSnapPoints().find((point) => point.state === sheetState)?.translate || 0;
+    }
+    try {
+      return new window.DOMMatrixReadOnly(transform).m42;
+    } catch {
+      const values = transform.match(/matrix(?:3d)?\(([^)]+)\)/)?.[1]?.split(",").map(Number) || [];
+      return values.length === 16 ? values[13] || 0 : values[5] || 0;
+    }
+  }
+
+  function writeTranslate(value) {
+    const element = sheetRef.current;
+    if (!element) return;
+    element.style.setProperty("--sheet-drag-y", `${value}px`);
+    dragRef.current.currentTranslate = value;
+  }
+
+  function queueTranslate(value) {
+    queuedTranslateRef.current = value;
+    if (dragFrameRef.current) return;
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      writeTranslate(queuedTranslateRef.current);
+    });
+  }
+
+  function flushQueuedTranslate() {
+    if (dragFrameRef.current) {
+      window.cancelAnimationFrame(dragFrameRef.current);
+      dragFrameRef.current = null;
+    }
+    if (queuedTranslateRef.current != null) writeTranslate(queuedTranslateRef.current);
+  }
+
+  function finishSnap(target) {
+    const element = sheetRef.current;
+    if (!element || !target) return;
+    delete element.dataset.dragging;
+    element.dataset.snapping = "true";
+    if (snapTimerRef.current) window.clearTimeout(snapTimerRef.current);
+    if (target.state === "closed") {
+      element.dataset.closing = "true";
+      dragFrameRef.current = window.requestAnimationFrame(() => {
+        dragFrameRef.current = null;
+        writeTranslate(target.translate);
+      });
+      snapTimerRef.current = window.setTimeout(onDismiss, 280);
+      return;
+    }
+    setSheetState(target.state);
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      writeTranslate(target.translate);
+    });
+    snapTimerRef.current = window.setTimeout(() => {
+      const currentElement = sheetRef.current;
+      currentElement?.style.removeProperty("--sheet-drag-y");
+      if (currentElement) delete currentElement.dataset.snapping;
+    }, 310);
+  }
+
+  function handlePointerDown(event) {
+    if (event.button != null && event.button !== 0) return;
+    const element = sheetRef.current;
+    if (!element) return;
+    if (snapTimerRef.current) window.clearTimeout(snapTimerRef.current);
+    if (dragFrameRef.current) window.cancelAnimationFrame(dragFrameRef.current);
+    dragFrameRef.current = null;
+    queuedTranslateRef.current = null;
+    delete event.currentTarget.dataset.dragged;
+    const currentTranslate = readCurrentTranslate(element);
+    dragRef.current = {
+      active: true,
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      lastY: event.clientY,
+      lastTime: performance.now(),
+      startTranslate: currentTranslate,
+      currentTranslate,
+      velocity: 0
+    };
+    element.dataset.dragging = "true";
+    element.style.setProperty("--sheet-drag-y", `${currentTranslate}px`);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handlePointerMove(event) {
+    const drag = dragRef.current;
+    if (!drag.active || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const now = performance.now();
+    const elapsed = Math.max(1, now - drag.lastTime);
+    const instantVelocity = (event.clientY - drag.lastY) / elapsed;
+    drag.velocity = drag.velocity * 0.58 + instantVelocity * 0.42;
+    drag.lastY = event.clientY;
+    drag.lastTime = now;
+    const closedTranslate = getSnapPoints().at(-1)?.translate || drag.startTranslate;
+    const nextTranslate = clamp(drag.startTranslate + event.clientY - drag.startY, 0, closedTranslate);
+    drag.currentTranslate = nextTranslate;
+    queueTranslate(nextTranslate);
+  }
+
+  function finishPointerGesture(event, cancelled = false) {
+    const drag = dragRef.current;
+    if (!drag.active || drag.pointerId !== event.pointerId) return;
+    flushQueuedTranslate();
+    drag.active = false;
+    try {
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Pointer capture can already be released by the browser on cancellation.
+    }
+    const distance = drag.currentTranslate - drag.startTranslate;
+    const dragged = Math.abs(event.clientY - drag.startY) > 6;
+    if (!dragged) {
+      const element = sheetRef.current;
+      if (element) delete element.dataset.dragging;
+      element?.style.removeProperty("--sheet-drag-y");
+      return;
+    }
+    event.currentTarget.dataset.dragged = "true";
+    const points = getSnapPoints();
+    const currentIndex = Math.max(0, points.findIndex((point) => point.state === sheetState));
+    let targetIndex = currentIndex;
+    if (!cancelled) {
+      const direction = Math.sign(Math.abs(drag.velocity) >= 0.45 ? drag.velocity : distance);
+      const nearestIndex = points.reduce((bestIndex, point, index) => (
+        Math.abs(point.translate - drag.currentTranslate) < Math.abs(points[bestIndex].translate - drag.currentTranslate)
+          ? index
+          : bestIndex
+      ), currentIndex);
+      if (Math.abs(drag.velocity) >= 0.45) {
+        targetIndex = clamp(currentIndex + direction, 0, points.length - 1);
+      } else if (Math.abs(distance) >= 52) {
+        targetIndex = nearestIndex === currentIndex
+          ? clamp(currentIndex + direction, 0, points.length - 1)
+          : nearestIndex;
+      }
+    }
+    finishSnap(points[targetIndex]);
+  }
+
+  function handlePointerUp(event) {
+    finishPointerGesture(event, false);
+  }
+
+  function handlePointerCancel(event) {
+    finishPointerGesture(event, true);
+  }
 
   function toggleSheet(event) {
     if (event?.currentTarget?.dataset.dragged === "true") {
@@ -5078,17 +5264,44 @@ function ScannerBottomSheet({
     else setSheetState(canPeek ? "peek" : "mid");
   }
 
+  function handleBackdropPress() {
+    const points = getSnapPoints();
+    if (sheetState === "full") {
+      const nextState = canPeek ? "peek" : "mid";
+      finishSnap(points.find((point) => point.state === nextState));
+      return;
+    }
+    finishSnap(points.find((point) => point.state === "closed"));
+  }
+
   return (
-    <section
-      key={`${mode}-${product?.id || "empty"}`}
-      className={`scanner-sheet scanner-sheet-${sheetState} scanner-sheet-${mode}`}
-      data-sheet-state={sheetState}
-    >
+    <>
       <button
+        type="button"
+        className={`scanner-sheet-backdrop scanner-sheet-backdrop-${sheetState}`}
+        onClick={handleBackdropPress}
+        aria-label={sheetState === "full" ? "Collapse scan result" : "Close scan result"}
+      />
+      <section
+        ref={sheetRef}
+        key={`${mode}-${product?.id || "empty"}`}
+        className={`scanner-sheet scanner-sheet-${sheetState} scanner-sheet-${mode}`}
+        data-sheet-state={sheetState}
+        role="dialog"
+        aria-modal="true"
+        aria-label={isProduct ? `${product.name} scan result` : "Scanner fallback options"}
+      >
+      <i className="sheet-snap-measure sheet-snap-measure-peek" data-snap-measure="peek" aria-hidden="true" />
+      <i className="sheet-snap-measure sheet-snap-measure-mid" data-snap-measure="mid" aria-hidden="true" />
+      <button
+        type="button"
         className="sheet-grabber"
-        onPointerDown={onPointerDown}
-        onPointerUp={onPointerUp}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         onClick={toggleSheet}
+        aria-expanded={sheetState === "full"}
         aria-label={sheetState === "full" ? "Collapse scan result" : "Expand scan result"}
       >
         <span />
@@ -5188,7 +5401,8 @@ function ScannerBottomSheet({
           useSampleProduct={useSampleProduct}
         />
       )}
-    </section>
+      </section>
+    </>
   );
 }
 
