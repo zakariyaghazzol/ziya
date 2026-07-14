@@ -5897,6 +5897,7 @@ function SearchScreen({ query, setQuery, results, status, lastSearchTerm, search
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Search food products"
+          aria-label="Search food products"
         />
         <button type="submit" aria-label="Submit search">
           <ChevronRight size={20} />
@@ -7884,7 +7885,7 @@ function BottomNav({ activeTab, setActiveTab }) {
     { id: "search", label: "Search", icon: Search }
   ];
   return (
-    <nav className="bottom-nav">
+    <nav className="bottom-nav" aria-label="Primary navigation">
       {tabs.map((tab) => {
         const Icon = tab.icon;
         const active = activeTab === tab.id
@@ -7892,10 +7893,12 @@ function BottomNav({ activeTab, setActiveTab }) {
           || (tab.id === "top" && activeTab === "profile");
         return (
           <button
+            type="button"
             key={tab.id}
             className={`${active ? "active" : ""} ${tab.primary ? "primary-tab" : ""}`}
             onClick={() => setActiveTab(tab.id)}
             aria-label={tab.label}
+            aria-current={active ? "page" : undefined}
           >
             <span>
               <Icon size={tab.primary ? 24 : 21} />
