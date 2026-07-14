@@ -7,6 +7,7 @@ import {
   resolveLocalIngredientKnowledge
 } from "./knowledge/ingredientKnowledge";
 import { sanitizeIngredientCandidates } from "./data/ingredientSanitizer";
+import { classifyIngredient } from "./lib/ingredientClassifier";
 import { createProductSourceRouting, getKnowledgeSourceRoute } from "./data/sourceRouter";
 import {
   getProductOverride,
@@ -83,6 +84,7 @@ import {
 import "./styles.css";
 
 const riskMeta = {
+  common: { label: "Common ingredient", className: "risk-safe" },
   safe: { label: "Low concern", className: "risk-safe" },
   moderate: { label: "Moderate concern", className: "risk-moderate" },
   harmful: { label: "Higher concern", className: "risk-harmful" },
@@ -1337,7 +1339,7 @@ function parseOpenFoodFactsIngredients(product) {
 
   const sanitation = selected || sanitizeIngredientCandidates([], { category: "food", sourceField: "ingredients" });
   const ingredients = sanitation.acceptedIngredients.slice(0, 48).map((candidate) => ({
-    ...createIngredientRecordFromLabel(candidate.originalText || candidate.normalizedText, "food"),
+    ...createIngredientRecordFromLabel(candidate.normalizedText || candidate.originalText, "food", candidate),
     originalLabelText: candidate.originalText,
     normalizedLabelText: candidate.normalizedText,
     ingredientSourceField: candidate.sourceField,
@@ -1699,10 +1701,15 @@ function getRecommendationReason(product, role) {
   return "Better fit";
 }
 
-function getRiskCounts(ingredients = []) {
+function getRiskCounts(ingredients = [], { forScoring = false } = {}) {
   return ingredients.reduce(
     (acc, ingredient) => {
-      const risk = ["safe", "moderate", "harmful", "unknown"].includes(ingredient.risk) ? ingredient.risk : "unknown";
+      const selectedRisk = forScoring ? ingredient.scoreRisk || ingredient.risk : ingredient.risk;
+      const risk = selectedRisk === "common"
+        ? "safe"
+        : ["safe", "moderate", "harmful", "unknown"].includes(selectedRisk)
+          ? selectedRisk
+          : "unknown";
       acc[risk] += 1;
       return acc;
     },
@@ -1725,7 +1732,7 @@ function scoreFoodProduct(input) {
   if (![n.calories, n.protein, n.carbs, n.fat, n.sugar, n.sodium].some(hasNumber)) nutrition -= 8;
   nutrition = clamp(nutrition, 0, 50);
 
-  const counts = getRiskCounts(input.ingredients || []);
+  const counts = getRiskCounts(input.ingredients || [], { forScoring: true });
   const ingredientPenalty = Math.min(counts.moderate * 5 + counts.harmful * 12, 28);
   const simplicityBonus = (input.ingredients || []).length <= 5 ? 4 : 0;
   const ingredients = clamp(35 - ingredientPenalty + simplicityBonus, 0, 35);
@@ -1745,23 +1752,64 @@ function scoreFoodProduct(input) {
   };
 }
 
-function createIngredientRecordFromLabel(label, category) {
-  const knowledge = resolveLocalIngredientKnowledge(label, { category });
+function createIngredientRecordFromLabel(label, category, parsedCandidate) {
+  const knowledge = classifyIngredient(parsedCandidate ? {
+    rawName: parsedCandidate.originalText || label,
+    normalizedName: parsedCandidate.normalizedText || label,
+    parentName: parsedCandidate.parentName || null,
+    allergenSources: parsedCandidate.allergenSources || [],
+    qualifiers: parsedCandidate.qualifiers || [],
+    sourceSegment: parsedCandidate.sourceSegment || "direct",
+    sourceField: parsedCandidate.sourceField,
+    children: []
+  } : label, { category });
+  const displayName = ["common", "vague"].includes(knowledge.classificationKind)
+    ? knowledge.displayName
+    : knowledge.canonicalName;
   return {
-    name: knowledge.canonicalName,
-    originalLabelText: knowledge.originalLabelText && knowledge.originalLabelText !== knowledge.canonicalName ? knowledge.originalLabelText : undefined,
+    name: displayName,
+    originalLabelText: parsedCandidate?.originalText || (knowledge.originalLabelText && knowledge.originalLabelText !== knowledge.canonicalName ? knowledge.originalLabelText : undefined),
     risk: knowledge.risk,
+    scoreRisk: knowledge.scoreRisk || knowledge.risk,
     type: knowledge.type,
-    knowledgeId: knowledge.id,
-    knowledgeConfidence: knowledge.confidence,
+    statusLabel: knowledge.statusLabel,
+    rowSubtitle: knowledge.rowSubtitle,
+    classificationKind: knowledge.classificationKind,
+    knowledgeId: knowledge.id || knowledge.canonicalName?.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    knowledgeConfidence: knowledge.knowledgeConfidence || knowledge.confidence,
     knowledgeSourceRoute: getKnowledgeSourceRoute(category),
-    translated: knowledge.translated,
-    translationConfidence: knowledge.translationConfidence
+    ingredientProvenance: knowledge.provenance,
+    allergenSources: knowledge.allergenSources,
+    allergenSignalType: knowledge.allergenSignalType,
+    processingMarkers: knowledge.processingMarkers,
+    vagueTerm: knowledge.vagueTerm,
+    plainDescription: knowledge.plainDescription,
+    whyUsed: knowledge.whyUsed,
+    nutritionRole: knowledge.nutritionRole,
+    statusDescription: knowledge.statusDescription,
+    translated: parsedCandidate?.translated ?? knowledge.translated,
+    translationConfidence: parsedCandidate?.translationConfidence || knowledge.translationConfidence
   };
 }
 
+function upgradeLegacyIngredientRecord(ingredient, category) {
+  if (!ingredient) return ingredient;
+  const upgraded = createIngredientRecordFromLabel(
+    ingredient.normalizedLabelText || ingredient.originalLabelText || ingredient.name,
+    category,
+    {
+      originalText: ingredient.originalLabelText || ingredient.name,
+      normalizedText: ingredient.normalizedLabelText || ingredient.name,
+      sourceField: ingredient.ingredientSourceField,
+      allergenSources: ingredient.allergenSources || [],
+      sourceSegment: ingredient.allergenSignalType || "direct"
+    }
+  );
+  return { ...ingredient, ...upgraded };
+}
+
 function scoreBeautyProduct(input) {
-  const counts = getRiskCounts(input.ingredients || []);
+  const counts = getRiskCounts(input.ingredients || [], { forScoring: true });
   let score = 88;
   score -= Math.min(counts.moderate * 6 + counts.harmful * 14, 42);
   if ((input.ingredients || []).some((ingredient) => ingredient.name.toLowerCase().includes("fragrance"))) score -= 8;
@@ -1771,7 +1819,7 @@ function scoreBeautyProduct(input) {
 }
 
 function scoreHouseholdProduct(input) {
-  const counts = getRiskCounts(input.ingredients || []);
+  const counts = getRiskCounts(input.ingredients || [], { forScoring: true });
   let score = 86;
   score -= Math.min(counts.moderate * 7 + counts.harmful * 16, 46);
   if (input.concerns?.some((concern) => concern.toLowerCase().includes("eye"))) score -= 6;
@@ -1804,7 +1852,7 @@ function createManualReport({
     excludedTerms: [productName, brand]
   });
   const ingredients = sanitation.acceptedIngredients.map((candidate) => ({
-    ...createIngredientRecordFromLabel(candidate.originalText || candidate.normalizedText, knowledgeCategory),
+    ...createIngredientRecordFromLabel(candidate.normalizedText || candidate.originalText, knowledgeCategory, candidate),
     originalLabelText: candidate.originalText,
     normalizedLabelText: candidate.normalizedText,
     ingredientSourceField: candidate.sourceField,
@@ -5868,7 +5916,15 @@ function ReportScreen({
 }) {
   const meta = categoryMeta[product.category];
   const Icon = meta.icon;
-  const counts = getRiskCounts(product.ingredients || []);
+  const ingredients = useMemo(
+    () => (product.ingredients || []).map((ingredient) => upgradeLegacyIngredientRecord(ingredient, product.category)),
+    [product.category, product.ingredients]
+  );
+  const intelligenceProduct = useMemo(
+    () => ({ ...product, ingredients }),
+    [ingredients, product]
+  );
+  const counts = getRiskCounts(ingredients);
   const isMedicine = product.category === "medicine";
   const isTextile = product.category === "textile";
   const isSummary = isMedicine || isTextile || product.analysisPending;
@@ -5878,16 +5934,15 @@ function ReportScreen({
   const showImageStatus = imageStatus !== confidenceStatus && ["Placeholder", "User Photo"].includes(imageStatus);
   const concerns = product.concerns || [];
   const positives = product.positives || [];
-  const ingredients = product.ingredients || [];
-  const additives = getProductAdditives(product);
+  const additives = getProductAdditives(intelligenceProduct);
   const allergens = getAllergenGroups(product.allergens);
   const nutritionCount = getAvailableNutritionRows(product.nutrition).length;
   const ingredientSubtitle = ingredients.length
     ? `${ingredients.length} ingredients · ${counts.moderate + counts.harmful} flagged${counts.unknown ? ` · ${counts.unknown} need review` : ""}`
     : "Needs label";
   const personalAlerts = useMemo(
-    () => getPersonalAlerts(product, personalProfile),
-    [product, personalProfile]
+    () => getPersonalAlerts(intelligenceProduct, personalProfile),
+    [intelligenceProduct, personalProfile]
   );
 
   return (
@@ -6015,7 +6070,7 @@ function ReportScreen({
                 expandedSection={expandedSection}
                 setExpandedSection={setExpandedSection}
               >
-                <ProcessingDetails product={product} />
+                <ProcessingDetails product={intelligenceProduct} />
               </ExpandableSection>
 
               <ExpandableSection
@@ -6038,7 +6093,7 @@ function ReportScreen({
                   expandedSection={expandedSection}
                   setExpandedSection={setExpandedSection}
                 >
-                  <EvaluationSummary product={product} />
+                  <EvaluationSummary product={intelligenceProduct} />
                 </ExpandableSection>
               )}
             </>
@@ -6120,18 +6175,24 @@ function IngredientRows({ ingredients, category, onIngredientClick, additive = f
     <div className="report-row-list ingredient-row-list">
       {ingredients.map((ingredient, index) => {
         const risk = riskMeta[ingredient.risk] || riskMeta.unknown;
+        const statusLabel = ingredient.statusLabel || risk.label;
+        const statusTone = ingredient.risk === "harmful"
+          ? "red"
+          : ingredient.risk === "moderate" || ingredient.risk === "unknown" || ingredient.processingMarkers?.length
+            ? "yellow"
+            : "green";
         return (
           <button
             className="ingredient-report-row"
             key={`${ingredient.name}-${ingredient.type || index}`}
             onClick={() => onIngredientClick({ ...ingredient, productCategory: category })}
           >
-            <span className={`status-dot ${ingredient.risk === "safe" ? "green" : ingredient.risk === "harmful" ? "red" : "yellow"}`} />
+            <span className={`status-dot ${statusTone}`} />
             <span className="ingredient-report-copy">
               <strong>{ingredient.name}</strong>
               <small>{ingredient.type || (additive ? "Listed additive" : "Purpose not available")}</small>
             </span>
-            <span className={`ingredient-risk-label ${risk.className}`}>{risk.label}</span>
+            <span className={`ingredient-risk-label ${risk.className}`}>{statusLabel}</span>
             <ChevronRight size={17} />
           </button>
         );
@@ -7361,9 +7422,10 @@ function FoodContributionSheet({ target, plateState, onClose, onUpdate, onRemove
 }
 
 function IngredientSheet({ ingredient, onClose }) {
+  const ingredientQuery = ingredient.normalizedLabelText || ingredient.name || ingredient.originalLabelText;
   const localKnowledge = useMemo(
-    () => resolveLocalIngredientKnowledge(ingredient.originalLabelText || ingredient.name, { category: ingredient.productCategory }),
-    [ingredient.name, ingredient.originalLabelText, ingredient.productCategory]
+    () => resolveLocalIngredientKnowledge(ingredientQuery, { category: ingredient.productCategory }),
+    [ingredient.productCategory, ingredientQuery]
   );
   const [knowledge, setKnowledge] = useState(localKnowledge);
   const [loading, setLoading] = useState(true);
@@ -7372,7 +7434,7 @@ function IngredientSheet({ ingredient, onClose }) {
     let cancelled = false;
     setKnowledge(localKnowledge);
     setLoading(true);
-    enrichIngredientKnowledge(ingredient.originalLabelText || ingredient.name, { category: ingredient.productCategory })
+    enrichIngredientKnowledge(ingredientQuery, { category: ingredient.productCategory })
       .then((result) => {
         if (!cancelled) setKnowledge(result);
       })
@@ -7385,11 +7447,13 @@ function IngredientSheet({ ingredient, onClose }) {
     return () => {
       cancelled = true;
     };
-  }, [ingredient.name, ingredient.originalLabelText, ingredient.productCategory, localKnowledge]);
+  }, [ingredient.productCategory, ingredientQuery, localKnowledge]);
 
   const risk = riskMeta[knowledge.risk || ingredient.risk] || riskMeta.unknown;
-  const originalDiffers = knowledge.originalLabelText
-    && normalizeKnowledgeDisplay(knowledge.originalLabelText) !== normalizeKnowledgeDisplay(knowledge.canonicalName);
+  const statusLabel = knowledge.statusLabel || ingredient.statusLabel || risk.label;
+  const originalLabelText = ingredient.originalLabelText || knowledge.originalLabelText;
+  const originalDiffers = originalLabelText
+    && normalizeKnowledgeDisplay(originalLabelText) !== normalizeKnowledgeDisplay(knowledge.canonicalName);
   const aliases = (knowledge.aliases || []).filter((alias) => normalizeKnowledgeDisplay(alias) !== normalizeKnowledgeDisplay(knowledge.canonicalName)).slice(0, 8);
   return (
     <div className="sheet-backdrop" onClick={onClose}>
@@ -7397,7 +7461,7 @@ function IngredientSheet({ ingredient, onClose }) {
         <div className="sheet-handle" />
         <div className="sheet-header">
           <div>
-            <span className={`risk-pill ${risk.className}`}>{risk.label}</span>
+            <span className={`risk-pill ${risk.className}`}>{statusLabel}</span>
             <h2>{knowledge.canonicalName}</h2>
           </div>
           <button onClick={onClose} aria-label="Close ingredient details">
@@ -7408,16 +7472,17 @@ function IngredientSheet({ ingredient, onClose }) {
         {(originalDiffers || knowledge.translationConfidence === "low") && (
           <InfoBlock
             label="Original label text"
-            value={`${knowledge.originalLabelText}${knowledge.translationConfidence === "low" ? " · Translation needs review; verify label" : ""}`}
+            value={`${originalLabelText}${knowledge.translationConfidence === "low" ? " · Translation needs review; verify label" : ""}`}
           />
         )}
         {aliases.length > 0 && <InfoBlock label="Also known as" value={aliases.join(", ")} />}
-        <InfoBlock label="What it is" value={knowledge.type} />
-        <InfoBlock label="Why it is used" value={knowledge.use} />
-        <InfoBlock label="Commonly found in" value={knowledge.commonUse} />
-        <InfoBlock label="Plain-English summary" value={knowledge.summary} />
-        <InfoBlock label="Evidence summary" value={knowledge.evidenceSummary} />
-        <InfoBlock label="Regulatory context" value={knowledge.regulatoryContext} />
+        <InfoBlock label="What it is" value={knowledge.plainDescription || knowledge.summary || knowledge.type} />
+        <InfoBlock label="Why it is used" value={knowledge.whyUsed || knowledge.use} />
+        {knowledge.nutritionRole && <InfoBlock label="Nutrition relevance" value={knowledge.nutritionRole} />}
+        <InfoBlock label="Ziya status" value={knowledge.statusDescription || knowledge.evidenceSummary} />
+        {knowledge.knowledgeKind !== "common_ingredient" && <InfoBlock label="Commonly found in" value={knowledge.commonUse} />}
+        {knowledge.knowledgeKind !== "common_ingredient" && <InfoBlock label="Evidence summary" value={knowledge.evidenceSummary} />}
+        {knowledge.knowledgeKind !== "common_ingredient" && <InfoBlock label="Regulatory context" value={knowledge.regulatoryContext} />}
         {knowledge.chemicalProperties && (
           <InfoBlock
             label="Chemical identity"

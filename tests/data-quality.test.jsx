@@ -97,13 +97,14 @@ function testIngredientSanitation() {
   assert.equal(arabic.acceptedIngredients.length, 3);
   assert(arabic.acceptedIngredients.every((item) => item.translationConfidence === "high"));
 
-  const unknown = sanitizeIngredientCandidates("mushroom powder", {
+  const recognizedFood = sanitizeIngredientCandidates("mushroom powder", {
     category: "food",
     sourceField: "ingredients_text",
     detectSection: false
   });
-  assert.equal(unknown.acceptedIngredients.length, 1);
-  assert.equal(resolveLocalIngredientKnowledge("mushroom powder", { category: "food" }).risk, "unknown");
+  assert.equal(recognizedFood.acceptedIngredients.length, 1);
+  assert.equal(resolveLocalIngredientKnowledge("mushroom powder", { category: "food" }).risk, "common");
+  assert.equal(resolveLocalIngredientKnowledge("zxqv mystery crystal flakes", { category: "food" }).risk, "unknown");
 
   const brandedNoise = sanitizeIngredientCandidates("Example Crunch, salt", {
     category: "food",

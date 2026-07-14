@@ -1,3 +1,7 @@
+import { findAdditiveAlias } from "../data/additiveAliasMap";
+import { findCommonIngredient } from "../data/commonIngredientAtlas";
+import { findVagueIngredientTerm } from "../data/vagueIngredientTerms";
+
 const SOURCE_CATALOG = Object.freeze({
   fdaRed3: {
     id: "fda-red-3-2025",
@@ -134,7 +138,7 @@ const DEFAULT_EVIDENCE = {
   low: "Available reference records do not identify a major concern for typical labeled use. Product form, amount, allergies, and individual sensitivity can still matter.",
   moderate: "The ingredient has context-dependent concerns or sensitivity considerations. Evidence and permitted uses vary by amount, product type, and jurisdiction.",
   higher: "The ingredient has a stronger regulatory, irritation, sensitization, or formulation concern in at least one relevant use. This does not establish that typical exposure will cause harm.",
-  unknown: "There is not enough matched source-backed information to assign a concern level. Unknown does not mean safe or harmful."
+  unknown: "There is not enough matched source-backed information to assign a concern level. Missing evidence does not establish either concern or absence of concern."
 };
 
 const CATEGORY_DEFAULTS = {
@@ -219,6 +223,7 @@ export const INGREDIENT_SEEDS = Object.freeze([
   seed({ canonicalName: "Tartrazine", aliases: ["Yellow 5", "Yellow No. 5", "FD&C Yellow No. 5", "E102", "C.I. 19140"], category: "food", type: "Synthetic food color", concernLevel: "moderate", use: "Adds a yellow color.", commonUse: "Drinks, candy, snacks, desserts, and medicines", sourceIds: ["fdaColors", "efsaColours", "jecfa"], confidence: "high" }),
   seed({ canonicalName: "Sunset Yellow FCF", aliases: ["Yellow 6", "Yellow No. 6", "FD&C Yellow No. 6", "E110", "C.I. 15985"], category: "food", type: "Synthetic food color", concernLevel: "moderate", use: "Adds an orange-yellow color.", sourceIds: ["fdaColors", "efsaColours", "jecfa"], confidence: "high" }),
   seed({ canonicalName: "Brilliant Blue FCF", aliases: ["Blue 1", "Blue No. 1", "FD&C Blue No. 1", "E133", "C.I. 42090"], category: "food", type: "Synthetic food color", concernLevel: "moderate", use: "Adds a blue color.", sourceIds: ["fdaColors", "efsaColours", "jecfa"], confidence: "high" }),
+  seed({ canonicalName: "Indigo carmine", aliases: ["Blue 2", "Blue No. 2", "FD&C Blue No. 2", "E132", "indigotine", "C.I. 73015"], category: "food", type: "Synthetic food color", concernLevel: "moderate", use: "Adds a blue color.", sourceIds: ["fdaColors", "efsaColours", "jecfa"], confidence: "high" }),
   seed({ canonicalName: "Titanium dioxide", aliases: ["E171", "CI 77891", "C.I. 77891", "titanium white"], category: "food", type: "Color additive / opacifier", concernLevel: "moderate", use: "Adds whiteness or opacity.", regulatoryContext: "Permitted uses vary by jurisdiction; food use is not authorized in the European Union, while other product-category uses follow separate rules.", sourceIds: ["fdaColors", "efsaColours", "echa"], confidence: "high", applicableCategories: ["food", "beauty", "medicine"] }),
   seed({ canonicalName: "Annatto", aliases: ["annatto color", "annatto extract", "E160b", "bixin", "norbixin"], category: "food", type: "Plant-derived color additive", concernLevel: "low", use: "Adds yellow to orange color.", sourceIds: ["fdaColors", "jecfa"], confidence: "high" }),
   seed({ canonicalName: "Caramel color", aliases: ["caramel colour", "E150", "E150a", "E150b", "E150c", "E150d"], category: "food", type: "Color additive", concernLevel: "moderate", use: "Adds brown color.", sourceIds: ["fdaColors", "jecfa"], confidence: "medium" }),
@@ -244,7 +249,7 @@ export const INGREDIENT_SEEDS = Object.freeze([
   seed({ canonicalName: "High-fructose corn syrup", aliases: ["HFCS", "high fructose corn syrup", "jarabe de maíz de alta fructosa", "sirop de glucose-fructose"], category: "food", type: "Caloric sweetener", concernLevel: "moderate", use: "Adds sweetness and body.", evidenceSummary: "Its contribution is best evaluated through the product's total added sugar and serving pattern rather than treating the ingredient name alone as proof of harm.", sourceIds: ["fdaAdditives"], confidence: "high" }),
   seed({ canonicalName: "Corn syrup", aliases: ["glucose syrup", "corn glucose syrup"], category: "food", type: "Caloric sweetener", concernLevel: "moderate", use: "Adds sweetness, body, and moisture control.", sourceIds: ["fdaAdditives"], confidence: "high" }),
   seed({ canonicalName: "Palm oil", aliases: ["palm fat", "huile de palme", "aceite de palma", "زيت النخيل"], category: "food", type: "Plant oil", concernLevel: "moderate", use: "Provides fat, texture, and shelf stability.", evidenceSummary: "Concern depends mainly on the food's saturated-fat profile, processing, sourcing, and overall dietary pattern.", sourceIds: ["fdaAdditives"], confidence: "high", applicableCategories: ["food", "beauty"] }),
-  seed({ canonicalName: "Partially hydrogenated oil", aliases: ["partially hydrogenated oils", "PHO", "partially hydrogenated vegetable oil"], category: "food", type: "Hydrogenated fat", concernLevel: "higher", use: "Historically used for texture and shelf stability.", regulatoryContext: "The FDA determined that partially hydrogenated oils are not generally recognized as safe for use in human food, subject to limited transition provisions.", sourceIds: ["fdaPho"], confidence: "high" }),
+  seed({ canonicalName: "Partially hydrogenated oil", aliases: ["partially hydrogenated oils", "PHO", "partially hydrogenated vegetable oil"], category: "food", type: "Hydrogenated fat", concernLevel: "higher", use: "Historically used for texture and shelf stability.", regulatoryContext: "The FDA determined that partially hydrogenated oils no longer qualified for generally recognized status for use in human food, subject to limited transition provisions.", sourceIds: ["fdaPho"], confidence: "high" }),
   seed({ canonicalName: "Monosodium glutamate", aliases: ["MSG", "E621", "sodium glutamate"], category: "food", type: "Flavor enhancer", concernLevel: "low", use: "Adds savory or umami taste.", evidenceSummary: "Available regulatory assessments support permitted food uses; some people report transient sensitivity symptoms, which does not justify a universal harmful classification.", sourceIds: ["fdaAdditives", "jecfa"], confidence: "high" }),
   seed({ canonicalName: "Enriched wheat flour", aliases: ["enriched flour", "farine de blé enrichie", "harina de trigo enriquecida", "دقيق القمح المدعم"], category: "food", type: "Refined grain ingredient", concernLevel: "low", use: "Provides flour with specified nutrients restored or added.", chemical: false, sourceIds: ["fdaAdditives"], confidence: "high" }),
   seed({ canonicalName: "Maltodextrin", aliases: [], category: "food", type: "Starch-derived carbohydrate", concernLevel: "moderate", use: "Adds body, carries flavors, or changes texture.", sourceIds: ["fdaAdditives"], confidence: "high" }),
@@ -389,7 +394,7 @@ export function normalizeIngredientLabel(value) {
   if (exact) {
     return { englishText: exact, originalText, translated: normalizeKnowledgeKey(exact) !== normalizeKnowledgeKey(originalText), translationConfidence: "high" };
   }
-  const eNumber = folded.match(/\be\s?(102|110|127|129|133|150[a-d]?|160b|171|202|211|250|251|282|319|320|321|322|407|412|415|433|621|900|950|951|955)\b/i);
+  const eNumber = folded.match(/\be\s?(102|110|127|129|132|133|150[a-d]?|160b|171|202|211|250|251|282|319|320|321|322|407|410|412|415|418|433|466|471|621|900|950|951|954|955)\b/i);
   if (eNumber) {
     const code = `E${eNumber[1].toUpperCase()}`;
     return { englishText: code, originalText, translated: normalizeKnowledgeKey(code) !== normalizeKnowledgeKey(originalText), translationConfidence: "high" };
@@ -426,7 +431,104 @@ function toRisk(concernLevel) {
   return "unknown";
 }
 
-export function resolveLocalIngredientKnowledge(query, { category } = {}) {
+function titleCaseKnowledge(value) {
+  return String(value || "").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function isPriorityExistingRecord(record, additiveAlias, category) {
+  if (!record) return false;
+  if (category && category !== "food") return true;
+  if (additiveAlias || record.concernLevel === "higher") return true;
+  return /(?:synthetic|color additive|preservative|high-intensity|curing|opacifier|surfactant|disinfect|bleach|fragrance|thickener \/ stabilizer)/i.test(record.type || "");
+}
+
+function commonAtlasKnowledge(record, normalizedLabel) {
+  const type = record.canonicalName === "salt" ? "Seasoning" : titleCaseKnowledge(record.category);
+  const processingMarker = record.tags.includes("processing-marker");
+  const sourceStatus = record.allergenSources.length
+    ? `${titleCaseKnowledge(record.allergenSources[0])} source`
+    : record.tags.includes("sodium-source")
+      ? "Sodium source"
+      : processingMarker
+        ? "Processing marker"
+        : "Common ingredient";
+  return {
+    id: slugify(record.canonicalName),
+    canonicalName: record.displayName,
+    originalLabelText: normalizedLabel.originalText,
+    aliases: record.aliases,
+    category: "food",
+    type,
+    commonUse: "Food ingredient labels",
+    use: record.whyUsed,
+    whyUsed: record.whyUsed,
+    plainDescription: record.plainDescription,
+    nutritionRole: record.nutritionRole,
+    concernLevel: "none",
+    risk: "common",
+    summary: record.plainDescription,
+    evidenceSummary: "Known common ingredient. No specific concern flagged by default. Product amount, allergies, and the full formulation can still matter.",
+    regulatoryContext: "No specific regulatory concern record is attached to this common ingredient entry.",
+    sources: [],
+    studies: [],
+    confidence: "high",
+    knowledgeKind: "common_ingredient",
+    statusLabel: sourceStatus,
+    rowSubtitle: `${type} · ${sourceStatus}`,
+    statusDescription: sourceStatus === "Common ingredient" ? "Known common ingredient. No specific concern flagged by default." : `${sourceStatus} found in the available label data.`,
+    tags: record.tags,
+    dietFlags: record.dietFlags,
+    allergenSources: record.allergenSources,
+    processingMarkers: processingMarker ? ["processing marker"] : [],
+    vagueTerm: false,
+    dataSources: ["Local Common Ingredient Atlas"],
+    applicableCategories: ["food"],
+    translated: normalizedLabel.translated,
+    translationConfidence: normalizedLabel.translationConfidence,
+    enrichmentStatus: "local"
+  };
+}
+
+function vagueAtlasKnowledge(record, normalizedLabel) {
+  const type = titleCaseKnowledge(record.vagueCategory);
+  return {
+    id: slugify(record.canonicalName),
+    canonicalName: record.displayName,
+    originalLabelText: normalizedLabel.originalText,
+    aliases: record.aliases,
+    category: "food",
+    type,
+    commonUse: "Food ingredient labels",
+    use: record.whyUsed,
+    whyUsed: record.whyUsed,
+    plainDescription: record.plainDescription,
+    nutritionRole: record.nutritionRole,
+    concernLevel: "unknown",
+    risk: "unknown",
+    summary: record.plainDescription,
+    evidenceSummary: "This is a broad label term. Exact ingredient details are not available from this phrase alone.",
+    regulatoryContext: "The exact source and formulation need package context.",
+    sources: [],
+    studies: [],
+    confidence: "medium",
+    knowledgeKind: "vague_label_term",
+    statusLabel: "Limited detail",
+    rowSubtitle: `${type} · Limited detail`,
+    statusDescription: "Limited detail. The exact source is not specified by this label term.",
+    tags: record.tags,
+    dietFlags: record.dietFlags,
+    allergenSources: [],
+    processingMarkers: record.tags.includes("processing-marker") ? ["processing marker"] : [],
+    vagueTerm: true,
+    dataSources: ["Local Vague Ingredient Terms"],
+    applicableCategories: ["food"],
+    translated: normalizedLabel.translated,
+    translationConfidence: normalizedLabel.translationConfidence,
+    enrichmentStatus: "local"
+  };
+}
+
+export function resolveLocalIngredientKnowledge(query, { category, includeAtlas = true } = {}) {
   const normalizedLabel = normalizeIngredientLabel(query);
   const key = normalizeKnowledgeKey(normalizedLabel.englishText);
   let record = selectAliasMatch(key, category);
@@ -442,7 +544,50 @@ export function resolveLocalIngredientKnowledge(query, { category } = {}) {
     if (categoryMatches.length === 1) record = categoryMatches[0];
   }
 
+  const additiveAlias = findAdditiveAlias(key);
+  const commonRecord = !category || category === "food" ? findCommonIngredient(key) : null;
+  const vagueRecord = !category || category === "food" ? findVagueIngredientTerm(key) : null;
+
+  if (includeAtlas && !isPriorityExistingRecord(record, additiveAlias, category)) {
+    if (commonRecord) return commonAtlasKnowledge(commonRecord, normalizedLabel);
+    if (vagueRecord) return vagueAtlasKnowledge(vagueRecord, normalizedLabel);
+  }
+
   if (!record) {
+    if (additiveAlias) {
+      const concernLevel = additiveAlias.concernLevel;
+      return {
+        id: slugify(additiveAlias.canonicalName),
+        canonicalName: additiveAlias.canonicalName,
+        originalLabelText: normalizedLabel.originalText,
+        aliases: additiveAlias.aliases,
+        category: category || "food",
+        type: additiveAlias.type,
+        commonUse: "Packaged food labels",
+        use: "Used as a labeled food additive.",
+        concernLevel,
+        risk: toRisk(concernLevel),
+        summary: `${additiveAlias.canonicalName} is a recognized ${additiveAlias.type.toLowerCase()}.`,
+        evidenceSummary: "The alias is recognized, but a fuller source-backed detail record is still needed.",
+        regulatoryContext: "Permitted uses and status can vary by region and product type.",
+        sources: [],
+        studies: [],
+        confidence: "medium",
+        knowledgeKind: "additive_alias",
+        statusLabel: additiveAlias.statusLabel,
+        rowSubtitle: `${additiveAlias.type} · ${additiveAlias.statusLabel}`,
+        tags: ["additive"],
+        dietFlags: { vegan: "unknown", vegetarian: "unknown", glutenFree: "unknown" },
+        allergenSources: [],
+        processingMarkers: [],
+        vagueTerm: false,
+        dataSources: ["Local Additive Alias Map"],
+        applicableCategories: [category || "food"],
+        translated: normalizedLabel.translated,
+        translationConfidence: normalizedLabel.translationConfidence,
+        enrichmentStatus: "local"
+      };
+    }
     return {
       id: `unknown-${slugify(normalizedLabel.englishText) || "ingredient"}`,
       canonicalName: normalizedLabel.englishText || "Unknown ingredient",
@@ -451,7 +596,7 @@ export function resolveLocalIngredientKnowledge(query, { category } = {}) {
       category: category || "unknown",
       type: "Ingredient or material not yet classified",
       commonUse: "Not available",
-      use: "No verified use description is available.",
+      use: "No source-backed use description is available.",
       concernLevel: "unknown",
       risk: "unknown",
       summary: "No detailed source-backed information yet.",
@@ -460,6 +605,15 @@ export function resolveLocalIngredientKnowledge(query, { category } = {}) {
       sources: [],
       studies: [],
       confidence: "low",
+      knowledgeKind: "unknown",
+      statusLabel: "Needs review",
+      rowSubtitle: "Needs review · Not enough data",
+      statusDescription: "Needs review. Ziya does not have enough source-backed data to identify this ingredient confidently.",
+      tags: [],
+      dietFlags: { vegan: "unknown", vegetarian: "unknown", glutenFree: "unknown" },
+      allergenSources: [],
+      processingMarkers: [],
+      vagueTerm: false,
       dataSources: [],
       applicableCategories: category ? [category] : [],
       translated: normalizedLabel.translated,
@@ -535,9 +689,11 @@ export async function enrichIngredientKnowledge(query, { category, includeStudie
   const cached = readClientCache(cacheKey);
   if (cached) return cached;
 
+  const isDeterministicAtlasEntry = ["common_ingredient", "vague_label_term"].includes(local.knowledgeKind);
   const isBroadIdentity = /family|mixture|category|fiber|flavoring category/i.test(local.type);
-  const shouldQueryCompound = local.category !== "textile" && !isBroadIdentity;
+  const shouldQueryCompound = !isDeterministicAtlasEntry && local.category !== "textile" && !isBroadIdentity;
   const shouldQueryStudies = includeStudies
+    && !isDeterministicAtlasEntry
     && local.confidence !== "low"
     && ["moderate", "higher"].includes(local.concernLevel)
     && !["textile", "medicine"].includes(local.category)

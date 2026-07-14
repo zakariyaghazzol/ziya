@@ -3,6 +3,7 @@ import {
   normalizeKnowledgeKey,
   resolveLocalIngredientKnowledge
 } from "../knowledge/ingredientKnowledge";
+import { flattenParsedIngredients, parseIngredientList } from "../lib/ingredientParser";
 
 const VALID_SHORT_NAMES = new Set([
   "bha",
@@ -50,8 +51,7 @@ const PACKAGING_PATTERNS = [
 
 const START_MARKERS = [
   /\b(?:ingredients?|ingredient list|ingr[eé]dients?|ingredientes?)\s*[:：]\s*/i,
-  /(?:\u0627\u0644\u0645\u0643\u0648\u0646\u0627\u062a|\u064a\u062d\u062a\u0648\u064a \u0639\u0644\u0649)\s*[:：]\s*/i,
-  /(?:^|\n)\s*contains\s*[:：]\s*/i
+  /(?:\u0627\u0644\u0645\u0643\u0648\u0646\u0627\u062a|\u064a\u062d\u062a\u0648\u064a \u0639\u0644\u0649)\s*[:：]\s*/i
 ];
 
 const STOP_MARKER = /\b(?:nutrition facts?|supplement facts?|drug facts?|manufactured by|distributed by|packed by|best by|sell by|storage instructions?|directions?|usage|warnings?|questions? or comments?|customer service|visit us|website|barcode|recycl(?:e|ing))\b|(?:\u062a\u062d\u0630\u064a\u0631\u0627\u062a|\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0627\u0633\u062a\u062e\u062f\u0627\u0645)/i;
@@ -93,24 +93,6 @@ export function detectIngredientSection(rawText) {
     startMarker: selected[0].trim(),
     stopMarker: stop?.[0]?.trim() || null
   };
-}
-
-function splitCandidates(value) {
-  const text = cleanRawText(value)
-    .replace(/[•·▪◦]/g, ",")
-    .replace(/\)(?=\s*[A-Za-z\p{L}])/gu, "),")
-    .replace(/\n+/g, ",");
-  const primary = text.split(/[,;،]+/).map((part) => part.trim()).filter(Boolean);
-  const expanded = [];
-  primary.forEach((part) => {
-    const parenthetical = [...part.matchAll(/\(([^()]*)\)/g)].map((match) => match[1]);
-    const base = part.replace(/\([^()]*\)/g, " ").trim();
-    if (base) expanded.push(base);
-    parenthetical.forEach((inside) => {
-      inside.split(/[,;،]+/).map((item) => item.trim()).filter(Boolean).forEach((item) => expanded.push(item));
-    });
-  });
-  return expanded;
 }
 
 function normalizeCandidate(value) {
@@ -172,17 +154,31 @@ export function sanitizeIngredientCandidates(
   }
 
   const candidateSource = section?.found ? section.text : rawText;
+  const parsed = isArrayInput ? null : parseIngredientList(candidateSource);
   const rawCandidates = isArrayInput
-    ? input.map((item) => item?.text || item?.id || item?._id || item).filter(Boolean)
-    : splitCandidates(candidateSource);
+    ? input.map((item) => ({ originalText: item?.text || item?.id || item?._id || item })).filter((item) => item.originalText)
+    : flattenParsedIngredients(parsed).map((node) => ({
+        originalText: node.rawName,
+        normalizedText: node.normalizedName,
+        parentName: node.parentName,
+        depth: node.depth,
+        allergenSources: node.allergenSources,
+        qualifiers: node.qualifiers,
+        sourceSegment: node.sourceSegment
+      }));
   const acceptedIngredients = [];
-  const rejectedFragments = [];
+  const rejectedFragments = (parsed?.rejectedFragments || []).map((fragment) => ({
+    originalText: fragment.rawName,
+    normalizedText: fragment.normalizedName,
+    rejectionReason: fragment.rejectionReason,
+    sourceField
+  }));
   const seen = new Set();
   const excludedKeys = new Set(excludedTerms.map(normalizeKnowledgeKey).filter(Boolean));
 
   rawCandidates.forEach((rawCandidate) => {
-    const originalText = cleanRawText(rawCandidate);
-    const candidate = normalizeCandidate(originalText);
+    const originalText = cleanRawText(rawCandidate.originalText);
+    const candidate = normalizeCandidate(rawCandidate.normalizedText || originalText);
     const knowledge = candidate ? resolveLocalIngredientKnowledge(candidate, { category }) : null;
     const knownMatch = Boolean(knowledge && knowledge.confidence !== "low");
     const rejectionReason = getRejectionReason(candidate, knownMatch, excludedKeys);
@@ -209,7 +205,12 @@ export function sanitizeIngredientCandidates(
             : "Plausible item from an ingredient-specific field",
       knowledgeId: knownMatch ? knowledge.id : null,
       translated: normalized.translated,
-      translationConfidence: normalized.translationConfidence
+      translationConfidence: normalized.translationConfidence,
+      parentName: rawCandidate.parentName || null,
+      depth: rawCandidate.depth || 0,
+      allergenSources: rawCandidate.allergenSources || [],
+      qualifiers: rawCandidate.qualifiers || [],
+      sourceSegment: rawCandidate.sourceSegment || "direct"
     });
   });
 
@@ -225,6 +226,9 @@ export function sanitizeIngredientCandidates(
       sectionDetected: Boolean(section?.found),
       startMarker: section?.startMarker || null,
       stopMarker: section?.stopMarker || null,
+      parsedStructure: parsed?.directIngredients || [],
+      containsStatements: parsed?.containsStatements || [],
+      advisoryStatements: parsed?.advisoryStatements || [],
       sourcePriority: sourceField.startsWith("ingredients") ? "provider-ingredient-field" : sourceField.startsWith("user") ? "user-provided" : "raw-label"
     }
   };

@@ -4,7 +4,9 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test:data-quality": "node scripts/run-data-quality-tests.cjs",
-    "test:profile": "node scripts/run-profile-tests.cjs"
+    "test:profile": "node scripts/run-profile-tests.cjs",
+    "test:ingredient-parser": "node scripts/test-ingredient-parser.cjs",
+    "test:ingredient-coverage": "node scripts/test-ingredient-coverage.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.2",
