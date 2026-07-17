@@ -4,6 +4,7 @@ import {
   mergeProductOverrideRecords
 } from "./productOverrides";
 import { mergeProfiles, sanitizeProfile } from "../profile/profileStore";
+import { mergePhase2States, sanitizePhase2State } from "../lib/phase2State";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -21,6 +22,31 @@ function newestIso(...values) {
 function assertResult(result, label) {
   if (result?.error) throw new Error(`${label}: ${result.error.message}`);
   return result?.data;
+}
+
+function isOptionalTableMissing(error) {
+  return ["42P01", "PGRST205"].includes(error?.code) || /phase2_state.*(?:not found|does not exist)/i.test(error?.message || "");
+}
+
+async function fetchCloudPhase2State(client, userId) {
+  const result = await client.from("phase2_state").select("state, updated_at").eq("user_id", userId).maybeSingle();
+  if (result.error) {
+    if (isOptionalTableMissing(result.error)) return null;
+    throw new Error(`Goals and places sync: ${result.error.message}`);
+  }
+  return result.data?.state
+    ? sanitizePhase2State({ ...result.data.state, updatedAt: result.data.updated_at || result.data.state.updatedAt })
+    : null;
+}
+
+async function upsertCloudPhase2State(client, userId, phase2State) {
+  const state = sanitizePhase2State(phase2State);
+  const result = await client.from("phase2_state").upsert({
+    user_id: userId,
+    state,
+    updated_at: state.updatedAt || new Date().toISOString()
+  }, { onConflict: "user_id" });
+  if (result.error && !isOptionalTableMissing(result.error)) throw new Error(`Goals and places sync: ${result.error.message}`);
 }
 
 function formatCloudHistoryDate(value) {
@@ -132,6 +158,7 @@ function cloudOverrideRecords(rows) {
 }
 
 async function fetchCloudBundle(client, userId) {
+  const phase2StatePromise = fetchCloudPhase2State(client, userId);
   const results = await Promise.all([
     client.from("profiles").select("*").eq("id", userId).maybeSingle(),
     client.from("profile_preferences").select("*").eq("user_id", userId).maybeSingle(),
@@ -146,6 +173,7 @@ async function fetchCloudBundle(client, userId) {
   const logRows = assertResult(results[3], "Today's Plate sync") || [];
   const historyRows = assertResult(results[4], "History sync") || [];
   const overrideRows = assertResult(results[5], "Product correction sync") || [];
+  const phase2State = await phase2StatePromise;
 
   return {
     profile: sanitizeProfile({
@@ -161,6 +189,7 @@ async function fetchCloudBundle(client, userId) {
       updatedAt: newestIso(profileRow?.updated_at, preferenceRow?.updated_at, goalsRow?.updated_at)
     }),
     plateState: cloudPlateState(goalsRow, logRows),
+    phase2State,
     history: cloudHistory(historyRows),
     overrides: cloudOverrideRecords(overrideRows),
     products: historyRows.map((row) => row.product_snapshot).filter((product) => product?.id)
@@ -256,14 +285,16 @@ async function upsertCloudBundle(client, userId, bundle, displayName) {
 
   const results = await Promise.all(requests);
   results.forEach((result, index) => assertResult(result, `Cloud write ${index + 1}`));
+  await upsertCloudPhase2State(client, userId, bundle.phase2State);
 }
 
-export async function syncZiyaData({ client, user, profile, plateState, history, productIndex }) {
+export async function syncZiyaData({ client, user, profile, plateState, phase2State, history, productIndex }) {
   if (!client || !user?.id) throw new Error("Sign in before syncing.");
   const cloud = await fetchCloudBundle(client, user.id);
   mergeProductOverrideRecords(cloud.overrides);
   const mergedProfile = mergeProfiles(profile, cloud.profile);
   const mergedPlateState = mergePlateStates(plateState, cloud.plateState);
+  const mergedPhase2State = mergePhase2States(phase2State, cloud.phase2State);
   const mergedHistory = mergeHistoryItems(history, cloud.history);
   const mergedProducts = [...new Map([
     ...cloud.products,
@@ -275,6 +306,7 @@ export async function syncZiyaData({ client, user, profile, plateState, history,
   await upsertCloudBundle(client, user.id, {
     profile: mergedProfile,
     plateState: mergedPlateState,
+    phase2State: mergedPhase2State,
     history: mergedHistory,
     productIndex: mergedProductIndex
   }, user.user_metadata?.full_name || user.user_metadata?.name || null);
@@ -282,6 +314,7 @@ export async function syncZiyaData({ client, user, profile, plateState, history,
   return {
     profile: mergedProfile,
     plateState: mergedPlateState,
+    phase2State: mergedPhase2State,
     history: mergedHistory,
     products: mergedProducts,
     syncedAt: new Date().toISOString()

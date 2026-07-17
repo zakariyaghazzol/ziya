@@ -11,6 +11,14 @@ import { PRODUCT_REGIONS, getPreferredProductLanguages, getProductMarketLabel, g
 import { classifyIngredient } from "./lib/ingredientClassifier";
 import { INGREDIENT_DISPLAY_MODES, getIngredientDisplayName } from "./lib/ingredientDisplayName";
 import { buildBetterMatches } from "./lib/betterMatches";
+import PhaseTwoScreen from "./phase2/PhaseTwoScreen";
+import {
+  createPhase2Id,
+  loadPhase2State,
+  savePhase2State,
+  touchPhase2State
+} from "./lib/phase2State";
+import { restaurantMealToProduct } from "./lib/restaurantProduct";
 import {
   OPEN_FOOD_FACTS_SEARCH_FIELDS,
   buildOpenFoodFactsSearchParams,
@@ -2867,6 +2875,7 @@ function App() {
   const [activeIngredient, setActiveIngredient] = useState(null);
   const [expandedSection, setExpandedSection] = useState(null);
   const [plateState, setPlateState] = useState(loadPlateState);
+  const [phase2State, setPhase2State] = useState(loadPhase2State);
   const [todayKey, setTodayKey] = useState(getLocalDateKey);
   const [servingProduct, setServingProduct] = useState(null);
   const [plateEntryTarget, setPlateEntryTarget] = useState(null);
@@ -2911,6 +2920,10 @@ function App() {
   useEffect(() => {
     saveProductHistory(scanHistory);
   }, [scanHistory]);
+
+  useEffect(() => {
+    savePhase2State(phase2State);
+  }, [phase2State]);
 
   useEffect(() => {
     saveLocalProfile(personalProfile);
@@ -3020,6 +3033,14 @@ function App() {
     if (authSession?.user) setSyncStatus("Sync paused");
   }
 
+  function updatePhase2Context(update) {
+    setPhase2State((current) => {
+      const patch = typeof update === "function" ? update(current) : update;
+      return touchPhase2State(current, patch);
+    });
+    if (authSession?.user) setSyncStatus("Sync paused");
+  }
+
   async function requestMagicLink(email) {
     const normalizedEmail = cleanText(email).toLowerCase();
     if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
@@ -3079,11 +3100,13 @@ function App() {
         user: authSession.user,
         profile: personalProfile,
         plateState,
+        phase2State,
         history: scanHistory,
         productIndex
       });
       setPersonalProfile(result.profile);
       setPlateState(result.plateState);
+      setPhase2State(result.phase2State || phase2State);
       setScanHistory(result.history);
       upsertDynamicProducts(result.products);
       setSyncStatus("Synced");
@@ -3106,6 +3129,38 @@ function App() {
 
   function recordHistoryProduct(product) {
     if (authSession?.user) setSyncStatus("Sync paused");
+    updatePhase2Context((current) => {
+      const now = new Date();
+      const recentDuplicate = current.activities.some((item) => item.type === "product_scanned"
+        && item.productId === product.id
+        && now.getTime() - Date.parse(item.occurredAt) < 10000);
+      if (recentDuplicate) return {};
+      const context = current.currentContext;
+      const contextIsFresh = context?.confirmed
+        && Number.isFinite(Date.parse(context.detectedAt))
+        && now.getTime() - Date.parse(context.detectedAt) < 6 * 60 * 60 * 1000;
+      const ingredients = [...(product.ingredients || []), ...((product.additives?.tags || []))]
+        .map((item) => typeof item === "string" ? item : item?.originalLabelText || item?.name)
+        .filter(Boolean)
+        .slice(0, 100);
+      return {
+        activities: [{
+          id: createPhase2Id("activity"),
+          type: "product_scanned",
+          occurredAt: now.toISOString(),
+          source: "scan",
+          productId: product.id,
+          metadata: {
+            score: hasNumber(product.score) ? product.score : null,
+            category: product.categoryPath || product.category,
+            sugar: hasNumber(product.nutrition?.sugar) ? product.nutrition.sugar : null,
+            context: contextIsFresh ? context.type : "",
+            placeId: contextIsFresh ? context.placeId : "",
+            ingredients
+          }
+        }, ...current.activities]
+      };
+    });
     setScanHistory((items) => {
       if (items[0]?.productId === product.id && items[0]?.date === "Today, just now") return items;
       const scannedAt = new Date().toISOString();
@@ -3300,8 +3355,48 @@ function App() {
       },
       updatedAt: new Date().toISOString()
     }));
+    const isSoda = /\b(soda|cola|soft drink)\b/i.test(`${product.name || ""} ${product.categoryPath || ""}`);
+    updatePhase2Context((current) => ({
+      activities: [{
+        id: createPhase2Id("activity"),
+        type: isSoda ? "soda_logged" : "food_logged",
+        occurredAt: new Date().toISOString(),
+        source: "manual",
+        productId: product.id,
+        metadata: {
+          category: product.categoryPath || product.category,
+          sugar: hasNumber(entry.contribution?.sugar) ? entry.contribution.sugar : null
+        }
+      }, ...current.activities]
+    }));
     setServingProduct(null);
     return true;
+  }
+
+  function logRestaurantMeal(meal, addToPlate = false) {
+    const product = restaurantMealToProduct(meal);
+    upsertDynamicProduct(product);
+    const addedToPlate = addToPlate && Boolean(getNutritionLogProfile(product)) && addPlateServing(product, 1, "servings");
+    updatePhase2Context((current) => {
+      const mealTime = Date.parse(meal.occurredAt);
+      const normalizedRestaurant = cleanText(meal.restaurantName).toLowerCase();
+      let linked = false;
+      const activities = current.activities.map((item) => {
+        if (linked || item.type !== "fast_food_visit" || item.restaurantMealId) return item;
+        const activityTime = Date.parse(item.occurredAt);
+        const placeName = cleanText(item.metadata?.placeName).toLowerCase();
+        const samePlace = item.placeId && item.placeId === meal.placeId
+          || placeName && normalizedRestaurant && (placeName.includes(normalizedRestaurant) || normalizedRestaurant.includes(placeName));
+        if (!samePlace || !Number.isFinite(activityTime) || !Number.isFinite(mealTime) || Math.abs(mealTime - activityTime) > 6 * 60 * 60 * 1000) return item;
+        linked = true;
+        return { ...item, restaurantMealId: meal.id };
+      });
+      return {
+        activities,
+        restaurantMeals: [{ ...meal, addedToPlate: Boolean(addedToPlate) }, ...current.restaurantMeals.filter((item) => item.id !== meal.id)]
+      };
+    });
+    return Boolean(addedToPlate);
   }
 
   function updatePlateEntry(dateKey, entryId, amount) {
@@ -3331,6 +3426,7 @@ function App() {
           plateState={plateState}
           onSaveGoals={savePlateGoals}
           onOpenPlateEntry={setPlateEntryTarget}
+          onOpenPhase2={() => setActiveTab("phase2")}
         />
       );
     }
@@ -3354,7 +3450,30 @@ function App() {
       return <RecommendationsScreen productIndex={productIndex} history={scanHistory} onOpenProduct={openProduct} />;
     }
     if (activeTab === "top") {
-      return <TopScreen productIndex={productIndex} realProducts={realProducts} onOpenProduct={openProduct} onOpenProfile={() => setActiveTab("profile")} />;
+      return (
+        <TopScreen
+          productIndex={productIndex}
+          realProducts={realProducts}
+          phase2State={phase2State}
+          onOpenProduct={openProduct}
+          onOpenProfile={() => setActiveTab("profile")}
+          onOpenPhase2={() => setActiveTab("phase2")}
+        />
+      );
+    }
+    if (activeTab === "phase2") {
+      return (
+        <PhaseTwoScreen
+          phase2State={phase2State}
+          plateState={plateState}
+          dailyTotals={dailyTotals}
+          personalProfile={personalProfile}
+          onChange={updatePhase2Context}
+          onBack={() => setActiveTab("top")}
+          onOpenScan={() => setActiveTab("scan")}
+          onLogMeal={logRestaurantMeal}
+        />
+      );
     }
     if (activeTab === "profile") {
       return (
@@ -5995,7 +6114,7 @@ function SearchScreen({ query, setQuery, results, status, lastSearchTerm, search
   );
 }
 
-function TopScreen({ productIndex, realProducts, onOpenProduct, onOpenProfile }) {
+function TopScreen({ productIndex, realProducts, phase2State, onOpenProduct, onOpenProfile, onOpenPhase2 }) {
   const [selectedCategory, setSelectedCategory] = useState("all");
   const shownProducts = featuredSampleIds
     .map((id) => productIndex.get(id))
@@ -6024,6 +6143,12 @@ function TopScreen({ productIndex, realProducts, onOpenProduct, onOpenProfile })
           </button>
         )}
       />
+      <button className="phase2-entry" type="button" onClick={onOpenPhase2}>
+        <span className="phase2-entry-icon"><Target size={21} /></span>
+        <span><strong>Goals & places</strong><small>Weekly goals, restaurant meals and trends</small></span>
+        <em>{phase2State.weeklyGoals.length + phase2State.longTermGoals.length || "Set up"}</em>
+        <ChevronRight size={18} />
+      </button>
       <div className="filter-tabs" role="group" aria-label="Product category">
         {categoryFilters.map(([value, label]) => (
           <button key={value} className={selectedCategory === value ? "active" : ""} onClick={() => setSelectedCategory(value)}>
@@ -7052,7 +7177,7 @@ function RecommendationTile({ product, icon, role, onOpenProduct }) {
   );
 }
 
-function HistoryScreen({ history, productIndex, onOpenProduct, plateState, onSaveGoals, onOpenPlateEntry }) {
+function HistoryScreen({ history, productIndex, onOpenProduct, plateState, onSaveGoals, onOpenPlateEntry, onOpenPhase2 }) {
   const [view, setView] = useState("today");
   const today = history.filter((item) => item.date.startsWith("Today"));
   const yesterday = history.filter((item) => item.date.startsWith("Yesterday"));
@@ -7064,7 +7189,7 @@ function HistoryScreen({ history, productIndex, onOpenProduct, plateState, onSav
         <button role="tab" aria-selected={view === "history"} className={view === "history" ? "active" : ""} onClick={() => setView("history")}>History</button>
       </div>
       {view === "today" ? (
-        <TodayPlateScreen plateState={plateState} onSaveGoals={onSaveGoals} onOpenPlateEntry={onOpenPlateEntry} />
+        <TodayPlateScreen plateState={plateState} onSaveGoals={onSaveGoals} onOpenPlateEntry={onOpenPlateEntry} onOpenPhase2={onOpenPhase2} />
       ) : (
         <>
           <Header eyebrow="History" title="Recently scanned" />
@@ -7083,7 +7208,7 @@ function HistoryScreen({ history, productIndex, onOpenProduct, plateState, onSav
   );
 }
 
-function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry }) {
+function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry, onOpenPhase2 }) {
   const todayKey = getLocalDateKey();
   const [dateKey, setDateKey] = useState(todayKey);
   const [editingGoals, setEditingGoals] = useState(false);
@@ -7130,6 +7255,12 @@ function TodayPlateScreen({ plateState, onSaveGoals, onOpenPlateEntry }) {
         </div>
         <PlateDateControl dateKey={dateKey} todayKey={todayKey} setDateKey={setDateKey} />
       </div>
+      {isToday && (
+        <button className="plate-context-link" type="button" onClick={onOpenPhase2}>
+          <span><Target size={18} /><span><strong>See this week & trends</strong><small>Put today in a flexible weekly context</small></span></span>
+          <ChevronRight size={18} />
+        </button>
+      )}
       {!goals ? (
         <EmptyState title="No foods were logged on this day" copy="Use the previous arrow to review another day." />
       ) : (
@@ -8044,7 +8175,7 @@ function BottomNav({ activeTab, setActiveTab }) {
         const Icon = tab.icon;
         const active = activeTab === tab.id
           || (tab.id === "scan" && activeTab === "report")
-          || (tab.id === "top" && activeTab === "profile");
+          || (tab.id === "top" && ["profile", "phase2"].includes(activeTab));
         return (
           <button
             type="button"

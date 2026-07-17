@@ -10,7 +10,8 @@
     "test:ingredient-coverage": "node scripts/test-ingredient-coverage.cjs",
     "test:multilingual-ingredients": "node scripts/test-multilingual-ingredients.cjs",
     "test:region-search": "node scripts/test-region-search.cjs",
-    "test:better-matches": "node scripts/test-better-matches.cjs"
+    "test:better-matches": "node scripts/test-better-matches.cjs",
+    "test:phase2": "node scripts/test-phase2.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.2",
