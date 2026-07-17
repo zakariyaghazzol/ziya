@@ -9,7 +9,16 @@ import {
   transitionWeeklyGoal,
   updateWeeklyGoal
 } from "../src/lib/weeklyGoalEngine.js";
-import { createLongTermGoal, buildLongTermGoalSummary } from "../src/lib/longTermGoalEngine.js";
+import {
+  buildLongTermGoalSummary,
+  createLongTermGoal,
+  createLongTermSnapshot,
+  getLongTermPeriodWindows,
+  materializeClosedLongTermSnapshots,
+  restartLongTermGoal,
+  transitionLongTermGoal,
+  updateLongTermGoal
+} from "../src/lib/longTermGoalEngine.js";
 import { analyzeGoalFit, analyzePreparationDetails, rankMenuItemsForGoals } from "../src/lib/goalFitAnalyzer.js";
 import { parseReceiptText } from "../src/lib/receiptParser.js";
 import { findNearbySavedPlace, haversineDistanceMeters } from "../src/lib/locationContextDetector.js";
@@ -427,6 +436,290 @@ function testPhase2MigrationAndSnapshotMerge() {
   assert.equal(merged.weeklySnapshots[0].goals[0].target, 2);
 }
 
+function dateInPeriod(window, dayOffset, hour = 12) {
+  const date = new Date(window.start);
+  date.setDate(date.getDate() + dayOffset);
+  date.setHours(hour, 0, 0, 0);
+  return date.toISOString();
+}
+
+function periodDateKey(window, dayOffset) {
+  const date = new Date(window.start);
+  date.setDate(date.getDate() + dayOffset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function scoreActivity(id, occurredAt, score) {
+  return {
+    id,
+    type: "product_scanned",
+    source: "scan",
+    occurredAt,
+    updatedAt: occurredAt,
+    productId: id,
+    metadata: { productName: id, category: "Food", score }
+  };
+}
+
+function testStableLongTermPeriodsAndThresholds() {
+  const testNow = new Date(2026, 4, 28, 12, 0, 0);
+  const goal = createLongTermGoal("average_product_quality", {
+    id: "stable-quality",
+    target: 5,
+    durationDays: 14,
+    startDate: new Date(2026, 4, 15, 0, 0, 0).toISOString(),
+    now: testNow
+  });
+  const windows = getLongTermPeriodWindows(goal, testNow);
+  assert.equal(windows.current.startKey, "2026-05-15");
+  assert.equal(windows.current.endKey, "2026-05-28");
+  assert.equal(windows.current.observedDays, 14);
+  assert.equal(windows.previous.startKey, "2026-05-01");
+  assert.equal(windows.previous.observedDays, 14);
+
+  const state = createEmptyPhase2State();
+  state.longTermGoals = [goal];
+  state.activities = [
+    scoreActivity("previous-1", dateInPeriod(windows.previous, 0), 68),
+    scoreActivity("previous-2", dateInPeriod(windows.previous, 1), 70),
+    scoreActivity("previous-3", dateInPeriod(windows.previous, 2), 72),
+    scoreActivity("current-1", dateInPeriod(windows.current, 0), 82),
+    scoreActivity("current-2", dateInPeriod(windows.current, 1), 84)
+  ];
+
+  const sparse = buildLongTermGoalSummary({ phase2State: state, plateState: { days: {} }, now: testNow }).goals[0];
+  assert.equal(sparse.comparisonReady, false);
+  assert.equal(sparse.insight, "");
+  assert.equal(sparse.current.meetsThreshold, false);
+  assert.match(sparse.detail, /needs 1 more confirmed entry/);
+
+  state.activities.push(scoreActivity("current-3", dateInPeriod(windows.current, 2), 86));
+  const ready = buildLongTermGoalSummary({ phase2State: state, plateState: { days: {} }, now: testNow }).goals[0];
+  assert.equal(ready.comparisonReady, true);
+  assert.equal(ready.status, "improving");
+  assert.match(ready.insight, /May 1 - May 14 compared with May 15 - May 28/);
+  assert.doesNotMatch(ready.insight, /\bcaused\b|because you|made you/i);
+
+  const dstGoal = createLongTermGoal("gym_routine", {
+    id: "dst-period",
+    durationDays: 14,
+    startDate: new Date(2026, 2, 1, 0, 0, 0).toISOString(),
+    now: new Date(2026, 2, 14, 12, 0, 0)
+  });
+  const dstWindows = getLongTermPeriodWindows(dstGoal, new Date(2026, 2, 14, 12, 0, 0));
+  assert.equal(dstWindows.current.startKey, "2026-03-01");
+  assert.equal(dstWindows.current.endKey, "2026-03-14");
+  assert.equal(dstWindows.current.observedDays, 14);
+}
+
+function testLongTermComparabilityAndPartialData() {
+  const testNow = new Date(2026, 4, 28, 12, 0, 0);
+  const goal = createLongTermGoal("average_product_quality", {
+    id: "coverage-quality",
+    durationDays: 14,
+    startDate: new Date(2026, 4, 15, 0, 0, 0).toISOString(),
+    now: testNow
+  });
+  const windows = getLongTermPeriodWindows(goal, testNow);
+  const uneven = createEmptyPhase2State();
+  uneven.longTermGoals = [goal];
+  uneven.activities = Array.from({ length: 8 }, (_, index) => scoreActivity("prior-wide-" + index, dateInPeriod(windows.previous, index), 80))
+    .concat(Array.from({ length: 3 }, (_, index) => scoreActivity("current-narrow-" + index, dateInPeriod(windows.current, index), 84)));
+  const unevenResult = buildLongTermGoalSummary({ phase2State: uneven, plateState: { days: {} }, now: testNow }).goals[0];
+  assert.equal(unevenResult.current.meetsThreshold, true);
+  assert.equal(unevenResult.previous.meetsThreshold, true);
+  assert.equal(unevenResult.comparisonReady, false);
+  assert.equal(unevenResult.comparisonReason, "uneven-evidence");
+  assert.match(unevenResult.detail, /different evidence coverage/);
+
+  const partial = createEmptyPhase2State();
+  partial.longTermGoals = [goal];
+  partial.activities = [
+    scoreActivity("partial-p1", dateInPeriod(windows.previous, 0), 80),
+    scoreActivity("partial-p2", dateInPeriod(windows.previous, 1), 82),
+    scoreActivity("partial-p3", dateInPeriod(windows.previous, 2), 84),
+    scoreActivity("partial-c1", dateInPeriod(windows.current, 0), 70),
+    scoreActivity("partial-c2", dateInPeriod(windows.current, 1), 72),
+    scoreActivity("partial-c3", dateInPeriod(windows.current, 2), 74),
+    scoreActivity("partial-missing", dateInPeriod(windows.current, 3), null)
+  ];
+  const partialResult = buildLongTermGoalSummary({ phase2State: partial, plateState: { days: {} }, now: testNow }).goals[0];
+  assert.equal(partialResult.comparisonReady, true);
+  assert.equal(partialResult.completeness, "partial");
+  assert.equal(partialResult.current.missingCount, 1);
+  assert.equal(partialResult.status, "watch");
+  assert.match(partialResult.insight, /changed from 82 to 72/);
+}
+
+function testLongTermSnapshotsAndDeletedEvidence() {
+  const testNow = new Date(2026, 4, 28, 12, 0, 0);
+  const goal = createLongTermGoal("average_product_quality", {
+    id: "snapshot-quality",
+    target: 5,
+    durationDays: 14,
+    startDate: new Date(2026, 4, 15, 0, 0, 0).toISOString(),
+    now: testNow
+  });
+  const windows = getLongTermPeriodWindows(goal, testNow);
+  const state = createEmptyPhase2State();
+  state.longTermGoals = [goal];
+  state.activities = [
+    scoreActivity("snapshot-p1", dateInPeriod(windows.previous, 0), 70),
+    scoreActivity("snapshot-p2", dateInPeriod(windows.previous, 1), 72),
+    scoreActivity("snapshot-p3", dateInPeriod(windows.previous, 2), 74),
+    scoreActivity("snapshot-c1", dateInPeriod(windows.current, 0), 80),
+    scoreActivity("snapshot-c2", dateInPeriod(windows.current, 1), 82),
+    scoreActivity("snapshot-c3", dateInPeriod(windows.current, 2), 84)
+  ];
+
+  const directSnapshot = createLongTermSnapshot({ phase2State: state, plateState: { days: {} }, goal, window: windows.previous, now: testNow });
+  assert.equal(directSnapshot.periodStartKey, "2026-05-01");
+  assert.equal(directSnapshot.metric.sampleCount, 3);
+
+  state.longTermSnapshots = materializeClosedLongTermSnapshots({ phase2State: state, plateState: { days: {} }, now: testNow });
+  assert.equal(state.longTermSnapshots.length, 1);
+  assert.equal(state.longTermSnapshots[0].target, 5);
+  assert.equal(buildLongTermGoalSummary({ phase2State: state, plateState: { days: {} }, now: testNow }).goals[0].comparisonReady, true);
+
+  const edited = updateLongTermGoal(goal, { target: 12 }, testNow);
+  const afterEdit = { ...state, longTermGoals: [edited] };
+  const preserved = materializeClosedLongTermSnapshots({ phase2State: afterEdit, plateState: { days: {} }, now: testNow });
+  assert.equal(preserved[0].target, 5);
+
+  const deleted = {
+    ...afterEdit,
+    longTermSnapshots: preserved,
+    activities: afterEdit.activities.filter((item) => item.id !== "snapshot-p1"),
+    deletedItems: [{ id: "activity:snapshot-p1", kind: "activity", targetId: "snapshot-p1", deletedAt: testNow.toISOString() }]
+  };
+  const invalidated = buildLongTermGoalSummary({ phase2State: deleted, plateState: { days: {} }, now: testNow }).goals[0];
+  assert.equal(invalidated.comparisonReady, false);
+  assert.equal(invalidated.comparisonReason, "evidence-changed");
+  assert.equal(invalidated.insight, "");
+  assert.match(invalidated.detail, /corrected or deleted/);
+}
+
+function testLongTermLifecycleAndCardLimit() {
+  const draft = createLongTermGoal("gym_routine", { id: "long-lifecycle", status: "draft", now });
+  assert.equal(draft.status, "draft");
+  assert.equal(draft.enabled, false);
+  const active = transitionLongTermGoal(draft, "active", now);
+  const paused = transitionLongTermGoal(active, "paused", now);
+  const completed = transitionLongTermGoal(paused, "completed", now);
+  const archived = transitionLongTermGoal(completed, "archived", now);
+  assert.equal(active.enabled, true);
+  assert.ok(paused.pausedAt);
+  assert.ok(completed.completedAt);
+  assert.ok(archived.archivedAt);
+  const restarted = restartLongTermGoal(archived, { id: "long-restarted" }, now);
+  assert.equal(restarted.status, "active");
+  assert.equal(restarted.parentGoalId, archived.id);
+  assert.equal(restarted.id, "long-restarted");
+
+  const freezeStart = new Date("2026-06-01T08:00:00-04:00");
+  const freezeGoal = createLongTermGoal("gym_routine", { id: "freeze-paused", startDate: freezeStart, now: freezeStart });
+  const freezeState = createEmptyPhase2State();
+  freezeState.longTermGoals = [transitionLongTermGoal(freezeGoal, "paused", now)];
+  const pausedAtTransition = buildLongTermGoalSummary({ phase2State: freezeState, plateState: { days: {} }, now }).inactiveGoals[0];
+  const pausedLater = buildLongTermGoalSummary({ phase2State: freezeState, plateState: { days: {} }, now: new Date("2026-10-01T12:00:00-04:00") }).inactiveGoals[0];
+  assert.equal(pausedLater.current.dateRange, pausedAtTransition.current.dateRange);
+  assert.equal(pausedLater.current.endAt, pausedAtTransition.current.endAt);
+
+  const state = createEmptyPhase2State();
+  state.longTermGoals = [
+    createLongTermGoal("gym_routine", { id: "featured-1", now }),
+    createLongTermGoal("protein_consistency", { id: "featured-2", now }),
+    createLongTermGoal("reduce_soda", { id: "featured-3", now }),
+    createLongTermGoal("average_product_quality", { id: "featured-4", now })
+  ];
+  const summary = buildLongTermGoalSummary({ phase2State: state, plateState: { days: {} }, now });
+  assert.equal(summary.goals.length, 4);
+  assert.equal(summary.featuredGoals.length, 3);
+  assert.deepEqual(new Set(summary.goals.map((goal) => goal.insightType)), new Set(["frequency", "quality", "consistency"]));
+}
+
+function testLongTermIncompleteIngredientAndProteinEvidence() {
+  const testNow = new Date(2026, 4, 28, 12, 0, 0);
+  const ingredientGoal = createLongTermGoal("avoid_ingredient", {
+    id: "ingredient-missing",
+    trackedValue: "Red 40",
+    durationDays: 14,
+    startDate: new Date(2026, 4, 15, 0, 0, 0).toISOString(),
+    now: testNow
+  });
+  const ingredientWindows = getLongTermPeriodWindows(ingredientGoal, testNow);
+  const ingredientState = createEmptyPhase2State();
+  ingredientState.longTermGoals = [ingredientGoal];
+  ingredientState.activities = [{
+    id: "missing-label",
+    type: "product_scanned",
+    source: "scan",
+    occurredAt: dateInPeriod(ingredientWindows.current, 0),
+    productId: "missing-label",
+    metadata: { productName: "Unknown label", ingredients: [] }
+  }];
+  const ingredient = buildLongTermGoalSummary({ phase2State: ingredientState, plateState: { days: {} }, now: testNow }).goals[0];
+  assert.equal(ingredient.current.sampleCount, 0);
+  assert.equal(ingredient.current.missingCount, 1);
+  assert.equal(ingredient.current.meetsThreshold, false);
+  assert.equal(ingredient.insight, "");
+  assert.match(ingredient.detail, /No reviewed ingredient labels/);
+
+  const proteinGoal = createLongTermGoal("protein_consistency", {
+    id: "protein-partial-period",
+    durationDays: 14,
+    startDate: new Date(2026, 4, 15, 0, 0, 0).toISOString(),
+    now: testNow
+  });
+  const proteinWindows = getLongTermPeriodWindows(proteinGoal, testNow);
+  const proteinState = createEmptyPhase2State();
+  proteinState.longTermGoals = [proteinGoal];
+  const plate = { goals: { protein: 100 }, days: {} };
+  [0, 1].forEach((offset) => {
+    const key = periodDateKey(proteinWindows.current, offset);
+    plate.days[key] = { goalsSnapshot: { protein: 100 }, entries: [plateEntry("protein-" + offset, { protein: offset ? 80 : 110 })] };
+  });
+  const protein = buildLongTermGoalSummary({ phase2State: proteinState, plateState: plate, now: testNow }).goals[0];
+  assert.equal(protein.current.sampleCount, 2);
+  assert.equal(protein.current.missingCount, 12);
+  assert.equal(protein.current.meetsThreshold, false);
+  assert.equal(protein.comparisonReady, false);
+}
+
+function testLongTermStateMigrationAndSnapshotMerge() {
+  const legacy = sanitizePhase2State({
+    version: 2,
+    longTermGoals: [{ id: "legacy-long", templateId: "gym_routine", enabled: false, target: 2, durationDays: 56 }]
+  });
+  assert.equal(legacy.version, PHASE2_STATE_VERSION);
+  assert.equal(legacy.longTermGoals[0].status, "paused");
+  assert.deepEqual(legacy.longTermSnapshots, []);
+
+  const testNow = new Date(2026, 4, 28, 12, 0, 0);
+  const goal = createLongTermGoal("average_product_quality", {
+    id: "merge-long",
+    durationDays: 14,
+    startDate: new Date(2026, 4, 15, 0, 0, 0).toISOString(),
+    now: testNow
+  });
+  const windows = getLongTermPeriodWindows(goal, testNow);
+  const local = createEmptyPhase2State();
+  local.longTermGoals = [goal];
+  local.activities = [
+    scoreActivity("merge-p1", dateInPeriod(windows.previous, 0), 70),
+    scoreActivity("merge-p2", dateInPeriod(windows.previous, 1), 72),
+    scoreActivity("merge-p3", dateInPeriod(windows.previous, 2), 74)
+  ];
+  const snapshot = createLongTermSnapshot({ phase2State: local, plateState: { days: {} }, goal, window: windows.previous, now: testNow });
+  local.longTermSnapshots = [snapshot];
+  local.updatedAt = "2026-05-28T10:00:00.000Z";
+  const cloud = createEmptyPhase2State();
+  cloud.longTermSnapshots = [{ ...snapshot, target: 99 }];
+  cloud.updatedAt = "2026-05-28T11:00:00.000Z";
+  const merged = mergePhase2States(local, cloud);
+  assert.equal(merged.longTermSnapshots.length, 1);
+  assert.equal(merged.longTermSnapshots[0].target, snapshot.target);
+}
 const DAY_FOR_TEST = 12 * 60 * 60 * 1000;
 testStateSanitationAndMerge();
 testLocalWeekBoundaries();
@@ -438,6 +731,12 @@ testImmutableWeeklySnapshots();
 testPhase2MigrationAndSnapshotMerge();
 testWeeklyGoals();
 testLongTermGoals();
+testStableLongTermPeriodsAndThresholds();
+testLongTermComparabilityAndPartialData();
+testLongTermSnapshotsAndDeletedEvidence();
+testLongTermLifecycleAndCardLimit();
+testLongTermIncompleteIngredientAndProteinEvidence();
+testLongTermStateMigrationAndSnapshotMerge();
 testGoalFitDoesNotInventValues();
 testMenuRanking();
 testReceiptParser();

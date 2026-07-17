@@ -3151,6 +3151,7 @@ function App() {
           source: "scan",
           productId: product.id,
           metadata: {
+            productName: product.name || "",
             score: hasNumber(product.score) ? product.score : null,
             category: product.categoryPath || product.category,
             sugar: hasNumber(product.nutrition?.sugar) ? product.nutrition.sugar : null,
@@ -3364,6 +3365,7 @@ function App() {
         source: "manual",
         productId: product.id,
         metadata: {
+          productName: product.name || "",
           category: product.categoryPath || product.category,
           sugar: hasNumber(entry.contribution?.sugar) ? entry.contribution.sugar : null
         }

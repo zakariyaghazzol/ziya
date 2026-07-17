@@ -39,7 +39,16 @@ import {
 import { buildContextualNudge, canSendContextNotification } from "../lib/contextualNudgeEngine";
 import { analyzeGoalFit, analyzePreparationDetails } from "../lib/goalFitAnalyzer";
 import { detectLocationContext, requestCurrentPosition } from "../lib/locationContextDetector";
-import { buildLongTermGoalSummary, createLongTermGoal } from "../lib/longTermGoalEngine";
+import {
+  buildLongTermGoalSummary,
+  createLongTermGoal,
+  getLongTermGoalHistory,
+  getSupportedLongTermDurations,
+  materializeClosedLongTermSnapshots,
+  restartLongTermGoal,
+  transitionLongTermGoal,
+  updateLongTermGoal
+} from "../lib/longTermGoalEngine";
 import { createPhase2DeletionPatch, createPhase2Id, touchPhase2State } from "../lib/phase2State";
 import { canUseBrowserTextRecognition, extractReceiptTextFromImage } from "../lib/receiptOcr";
 import { parseReceiptText, receiptConfidenceCopy } from "../lib/receiptParser";
@@ -285,7 +294,7 @@ export default function PhaseTwoScreen({
           onLogMeal={onLogMeal}
         />
       )}
-      {view === "trends" && <LongTermGoalsPanel state={phase2State} summary={longTermSummary} onChange={update} />}
+      {view === "trends" && <LongTermGoalsPanel state={phase2State} plateState={plateState} summary={longTermSummary} onChange={update} />}
     </div>
   );
 }
@@ -340,6 +349,13 @@ function WeeklyGoalsPanel({ state, plateState, summary, onChange }) {
     .sort()[0];
   const canGoPrevious = selectedStartKey > earliestStartKey;
   const canGoNext = selectedStartKey < currentStartKey;
+  function deleteEvidence(item) {
+    const kind = item.sourceType === "restaurant-meal" ? "restaurantMeal" : item.sourceType === "activity" ? "activity" : "";
+    if (!kind) return;
+    onChange((current) => createPhase2DeletionPatch(current, kind, [item.sourceId], kind === "activity"
+      ? { activities: current.activities.filter((entry) => entry.id !== item.sourceId) }
+      : { restaurantMeals: current.restaurantMeals.filter((entry) => entry.id !== item.sourceId) }));
+  }
   const detailGoal = sheet?.type === "detail"
     ? [...visibleSummary.goals, ...inactiveSummary.goals].find((goal) => goal.id === sheet.goalId) || null
     : null;
@@ -994,49 +1010,377 @@ function ReceiptPanel({ state, weeklySummary, dailyTotals, dailyGoals, personalP
   );
 }
 
-function LongTermGoalsPanel({ state, summary, onChange }) {
-  const [templateId, setTemplateId] = useState(LONG_TERM_GOAL_TEMPLATES[0].id);
-  const template = LONG_TERM_GOAL_TEMPLATES.find((item) => item.id === templateId);
-  const [target, setTarget] = useState(String(template.defaultTarget));
-  const [trackedValue, setTrackedValue] = useState("");
+function LongTermGoalsPanel({ state, plateState, summary, onChange }) {
+  const [sheet, setSheet] = useState(null);
+  const returnFocusRef = useRef(null);
+  const snapshotSignature = useMemo(
+    () => (state.longTermSnapshots || []).map((item) => item.id).sort().join("|"),
+    [state.longTermSnapshots]
+  );
+  const activeDefinitions = useMemo(
+    () => state.longTermGoals.filter((goal) => (goal.status || (goal.enabled === false ? "paused" : "active")) === "active"),
+    [state.longTermGoals]
+  );
 
   useEffect(() => {
-    setTarget(String(template.defaultTarget));
-    setTrackedValue("");
-  }, [template.id]);
+    const next = materializeClosedLongTermSnapshots({ phase2State: state, plateState });
+    const nextSignature = next.map((item) => item.id).sort().join("|");
+    if (nextSignature === snapshotSignature) return;
+    onChange((current) => ({
+      longTermSnapshots: materializeClosedLongTermSnapshots({ phase2State: current, plateState })
+    }));
+  }, [onChange, plateState, snapshotSignature, state]);
 
-  function addGoal(event) {
+  function closeSheet() {
+    setSheet(null);
+    window.requestAnimationFrame(() => returnFocusRef.current?.focus());
+  }
+
+  function openSheet(next, event) {
+    returnFocusRef.current = event?.currentTarget || null;
+    setSheet(next);
+  }
+
+  function persistWithClosedPeriods(updateGoals) {
+    onChange((current) => ({
+      longTermSnapshots: materializeClosedLongTermSnapshots({ phase2State: current, plateState }),
+      longTermGoals: updateGoals(current.longTermGoals)
+    }));
+  }
+
+  function saveGoal(values, existingGoal = null) {
+    if (existingGoal) {
+      persistWithClosedPeriods((goals) => goals.map((goal) => goal.id === existingGoal.id ? updateLongTermGoal(goal, values) : goal));
+    } else {
+      const goal = createLongTermGoal(values.templateId, values);
+      onChange((current) => ({ longTermGoals: goal ? [...current.longTermGoals, goal] : current.longTermGoals }));
+    }
+    setSheet(null);
+  }
+
+  function setLifecycle(goalId, status) {
+    persistWithClosedPeriods((goals) => goals.map((goal) => goal.id === goalId ? transitionLongTermGoal(goal, status) : goal));
+    setSheet(null);
+  }
+
+  function restartGoal(goalId) {
+    persistWithClosedPeriods((goals) => {
+      const original = goals.find((goal) => goal.id === goalId);
+      const restarted = restartLongTermGoal(original);
+      return restarted ? [...goals, restarted] : goals;
+    });
+    setSheet(null);
+  }
+
+  function deleteEvidence(item) {
+    const kind = item.sourceType === "restaurant-meal" ? "restaurantMeal" : item.sourceType === "activity" ? "activity" : "";
+    if (!kind) return;
+    onChange((current) => createPhase2DeletionPatch(current, kind, [item.sourceId], kind === "activity"
+      ? { activities: current.activities.filter((entry) => entry.id !== item.sourceId) }
+      : { restaurantMeals: current.restaurantMeals.filter((entry) => entry.id !== item.sourceId) }));
+  }
+  const detailGoal = sheet?.type === "detail"
+    ? [...summary.goals, ...summary.inactiveGoals].find((goal) => goal.id === sheet.goalId)
+    : null;
+  const editDefinition = sheet?.type === "edit" ? state.longTermGoals.find((goal) => goal.id === sheet.goalId) : null;
+  const remainingGoals = summary.goals.slice(3);
+
+  return (
+    <div className="stack phase2-view phase2-trends-view">
+      <section className="phase2-trend-intro">
+        <span className="phase2-trend-intro-icon"><TrendingUp size={22} /></span>
+        <div><span className="eyebrow">Long-term trends</span><h2>What is changing?</h2><p>{summary.summary}</p></div>
+        <span className="phase2-trend-ready-count"><strong>{summary.readyInsightCount}</strong><small>ready</small></span>
+      </section>
+
+      {summary.featuredGoals.length ? (
+        <section className="phase2-trend-section" aria-labelledby="trend-insights-title">
+          <div className="phase2-list-heading">
+            <div><span className="eyebrow">Stable periods</span><h2 id="trend-insights-title">Your tracked directions</h2><p>Each comparison uses confirmed evidence from matching date ranges.</p></div>
+            <button type="button" ref={returnFocusRef} className="phase2-add-goal-trigger" onClick={(event) => openSheet({ type: "create" }, event)}><Plus size={17} />Add</button>
+          </div>
+          <div className="phase2-trend-card-list">
+            {summary.featuredGoals.map((goal) => <LongTermInsightCard key={goal.id} goal={goal} onOpen={(event) => openSheet({ type: "detail", goalId: goal.id }, event)} />)}
+          </div>
+        </section>
+      ) : (
+        <section className="phase2-empty phase2-week-empty">
+          <TrendingUp size={25} />
+          <strong>No long-term direction yet</strong>
+          <p>Start one goal. Ziya waits for two comparable periods before describing a trend.</p>
+          <button type="button" ref={returnFocusRef} className="primary-button" onClick={(event) => openSheet({ type: "create" }, event)}><Plus size={18} />Choose a direction</button>
+        </section>
+      )}
+
+      {remainingGoals.length > 0 && (
+        <details className="phase2-panel phase2-lifecycle-disclosure">
+          <summary><span><Target size={18} /><strong>More tracked goals</strong><small>{remainingGoals.length} additional {remainingGoals.length === 1 ? "direction" : "directions"}</small></span><ChevronDown size={18} /></summary>
+          <div className="phase2-lifecycle-list">
+            {remainingGoals.map((goal) => <button type="button" key={goal.id} onClick={(event) => openSheet({ type: "detail", goalId: goal.id }, event)}><span><strong>{goal.label}</strong><small>{goal.statusLabel} | {goal.current.dateRange}</small></span><ChevronRight size={17} /></button>)}
+          </div>
+        </details>
+      )}
+
+      {summary.inactiveGoals.length > 0 && (
+        <details className="phase2-panel phase2-lifecycle-disclosure">
+          <summary><span><Archive size={18} /><strong>Paused & saved</strong><small>{summary.inactiveGoals.length} inactive {summary.inactiveGoals.length === 1 ? "goal" : "goals"}</small></span><ChevronDown size={18} /></summary>
+          <div className="phase2-lifecycle-list">
+            {summary.inactiveGoals.map((goal) => <button type="button" key={goal.id} onClick={(event) => openSheet({ type: "detail", goalId: goal.id }, event)}><span><strong>{goal.label}</strong><small>{goal.statusLabel} | {goal.durationDays}-day periods</small></span><ChevronRight size={17} /></button>)}
+          </div>
+        </details>
+      )}
+
+      <p className="phase2-trend-disclosure"><Info size={15} />Trends reflect only confirmed activity in Ziya. Selective logging can make periods less comparable.</p>
+
+      {(sheet?.type === "create" || editDefinition) && (
+        <LongTermGoalEditorSheet
+          goal={editDefinition}
+          activeGoals={activeDefinitions}
+          onClose={closeSheet}
+          onSave={(values) => saveGoal(values, editDefinition)}
+        />
+      )}
+      {detailGoal && (
+        <LongTermGoalDetailSheet
+          goal={detailGoal}
+          history={getLongTermGoalHistory(state, detailGoal.id)}
+          onClose={closeSheet}
+          onEdit={() => setSheet({ type: "edit", goalId: detailGoal.id })}
+          onLifecycle={(status) => setLifecycle(detailGoal.id, status)}
+          onRestart={() => restartGoal(detailGoal.id)}
+          onDeleteEvidence={deleteEvidence}
+        />
+      )}
+    </div>
+  );
+}
+
+function trendPeriodValue(period) {
+  if (period.comparisonValue === null || period.comparisonValue === undefined) return "Missing";
+  return formatMetric(period.comparisonValue) + (String(period.comparisonUnit || "").startsWith("%") ? "%" : "");
+}
+
+function trendCompletenessLabel(period) {
+  if (period.completeness === "changed") return "Evidence changed";
+  if (period.completeness === "complete") return "Complete";
+  if (period.completeness === "partial") return "Partial";
+  if (period.completeness === "sparse") return "Sparse";
+  return "No evidence";
+}
+
+function LongTermInsightCard({ goal, onOpen }) {
+  const Icon = goal.insightType === "consistency" ? Target : TrendingUp;
+  return (
+    <button type="button" className={"phase2-trend-card status-" + goal.status} onClick={onOpen} aria-label={"Open evidence for " + goal.label}>
+      <span className="phase2-trend-card-icon"><Icon size={20} /></span>
+      <span className="phase2-trend-card-main">
+        <span className="phase2-trend-card-title"><strong>{goal.label}</strong><em>{goal.statusLabel}</em></span>
+        <span className="phase2-trend-card-copy">{goal.detail}</span>
+        {goal.comparisonReady ? (
+          <span className="phase2-trend-comparison" aria-label={"Previous " + trendPeriodValue(goal.previous) + ", current " + trendPeriodValue(goal.current)}>
+            <span><small>Previous</small><strong>{trendPeriodValue(goal.previous)}</strong></span>
+            <i aria-hidden="true"><span /></i>
+            <span><small>Current</small><strong>{trendPeriodValue(goal.current)}</strong></span>
+          </span>
+        ) : (
+          <span className="phase2-trend-baseline">
+            <span><strong>{goal.current.sampleCount}</strong><small>current entries</small></span>
+            <i><span style={{ width: Math.min(100, goal.current.sampleCount / goal.current.minimumEvidence * 100) + "%" }} /></i>
+            <small>{goal.current.minimumEvidence} needed</small>
+          </span>
+        )}
+        <span className="phase2-trend-card-meta"><CalendarRange size={14} />{goal.current.dateRange}<i>{trendCompletenessLabel(goal.current)}</i></span>
+      </span>
+      <ChevronRight className="phase2-trend-card-chevron" size={18} />
+    </button>
+  );
+}
+
+function LongTermEvidenceList({ rows, emptyCopy, onDeleteEvidence = null }) {
+  if (!rows.length) return <div className="phase2-evidence-empty"><Info size={18} /><span><strong>No supporting entries</strong><small>{emptyCopy}</small></span></div>;
+  return (
+    <div className="phase2-evidence-list phase2-trend-evidence-list">
+      {rows.slice(0, 24).map((item) => {
+        const canDelete = onDeleteEvidence && (item.sourceType === "activity" || item.sourceType === "restaurant-meal");
+        return (
+          <div key={item.id} className={item.missing ? "missing" : ""}>
+            <span className="phase2-evidence-source">{item.missing ? <AlertCircle size={16} /> : <Check size={16} />}</span>
+            <span><strong>{item.label}</strong><small>{item.detail} | {new Date(item.occurredAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</small></span>
+            {canDelete ? <button type="button" className="phase2-evidence-delete" onClick={() => onDeleteEvidence(item)} aria-label={"Delete " + item.label + " from trend evidence"}><Trash2 size={15} /></button> : <em>{formatEvidenceValue(item)}</em>}
+          </div>
+        );
+      })}
+      {rows.length > 24 && <p className="phase2-helper">{rows.length - 24} older entries remain in this saved period.</p>}
+    </div>
+  );
+}
+
+function LongTermGoalDetailSheet({ goal, history, onClose, onEdit, onLifecycle, onRestart, onDeleteEvidence }) {
+  const lifecycle = goal.lifecycleStatus;
+  const currentReady = goal.current.meetsThreshold;
+  const previousReady = goal.previous.meetsThreshold;
+  return (
+    <Phase2Sheet titleId="long-term-goal-detail-title" onClose={onClose} className="phase2-goal-detail-sheet phase2-trend-detail-sheet">
+      <header className="phase2-sheet-header phase2-detail-header">
+        <div><span className="eyebrow">{goal.statusLabel}</span><h2 id="long-term-goal-detail-title">{goal.label}</h2><p>{goal.durationDays}-day fixed periods | target {formatMetric(goal.target)} {goal.unit}</p></div>
+        <button type="button" onClick={onClose} aria-label="Close trend details"><X size={20} /></button>
+      </header>
+
+      <div className={"phase2-detail-summary status-" + goal.status}>
+        <span className="phase2-detail-status-icon">{goal.comparisonReady ? <TrendingUp size={21} /> : <Clock3 size={21} />}</span>
+        <div><strong>{goal.comparisonReady ? goal.statusLabel : "Comparison not ready"}</strong><p>{goal.detail}</p></div>
+      </div>
+
+      <section className="phase2-trend-period-comparison" aria-label="Period comparison">
+        <div className={previousReady ? "ready" : ""}>
+          <span>Previous period</span>
+          <strong>{trendPeriodValue(goal.previous)}</strong>
+          <small>{goal.previous.comparisonUnit}</small>
+          <em>{goal.previous.dateRange}</em>
+        </div>
+        <span className="phase2-trend-period-arrow"><ChevronRight size={18} /></span>
+        <div className={currentReady ? "ready" : ""}>
+          <span>Current period</span>
+          <strong>{trendPeriodValue(goal.current)}</strong>
+          <small>{goal.current.comparisonUnit}</small>
+          <em>{goal.current.dateRange}</em>
+        </div>
+      </section>
+
+      <section className="phase2-trend-quality">
+        <div><span><strong>Current evidence</strong><small>{goal.current.sampleCount} of {goal.current.minimumEvidence} minimum | {goal.current.dayCount} days</small></span><em>{trendCompletenessLabel(goal.current)}</em></div>
+        <div><span><strong>Previous evidence</strong><small>{goal.previous.sampleCount} of {goal.previous.minimumEvidence} minimum | {goal.previous.dayCount} days</small></span><em>{trendCompletenessLabel(goal.previous)}</em></div>
+      </section>
+
+      <section className="phase2-evidence-section">
+        <div className="phase2-evidence-heading"><div><span className="eyebrow">Current period</span><h3>What counted</h3></div><small>{goal.current.evidenceCount} entries</small></div>
+        <LongTermEvidenceList rows={goal.current.evidence} emptyCopy="Confirmed activity for this metric will appear here." onDeleteEvidence={onDeleteEvidence} />
+        {goal.current.missingCount > 0 && <p className="phase2-missing-note"><AlertCircle size={15} />{goal.current.missingCount} {goal.current.missingCount === 1 ? "entry is" : "entries are"} missing a required field and do not count toward comparison.</p>}
+      </section>
+
+      <details className="phase2-trend-previous-evidence">
+        <summary><span><strong>Previous period evidence</strong><small>{goal.previous.dateRange} | {goal.previous.evidenceCount} entries</small></span><ChevronDown size={17} /></summary>
+        <LongTermEvidenceList rows={goal.previous.evidence} emptyCopy="No comparable entries were confirmed in this period." onDeleteEvidence={onDeleteEvidence} />
+      </details>
+
+      {history.length > 0 && (
+        <details className="phase2-trend-history">
+          <summary><span><strong>Saved period history</strong><small>{history.length} immutable {history.length === 1 ? "period" : "periods"}</small></span><ChevronDown size={17} /></summary>
+          <div>
+            {history.slice(0, 8).map((snapshot) => (
+              <details key={snapshot.id}>
+                <summary><span><strong>{snapshot.periodStartKey} to {snapshot.periodEndKey}</strong><small>{snapshot.metric.sampleCount} confirmed | {trendCompletenessLabel(snapshot.metric)}</small></span><ChevronDown size={16} /></summary>
+                <LongTermEvidenceList rows={snapshot.evidence || []} emptyCopy="This closed period has no supporting entries." onDeleteEvidence={onDeleteEvidence} />
+              </details>
+            ))}
+          </div>
+        </details>
+      )}
+
+      <p className="phase2-trend-caveat"><Info size={15} />{goal.caveat} Deleting a contributing event removes it from future calculations; a closed saved period is flagged as changed rather than silently rewritten.</p>
+
+      <div className="phase2-goal-actions">
+        {(lifecycle === "active" || lifecycle === "paused" || lifecycle === "draft") && <button type="button" onClick={onEdit}><Edit3 size={16} />Edit</button>}
+        {lifecycle === "active" && <button type="button" onClick={() => onLifecycle("paused")}><Pause size={16} />Pause</button>}
+        {(lifecycle === "paused" || lifecycle === "draft") && <button type="button" onClick={() => onLifecycle("active")}><Play size={16} />{lifecycle === "draft" ? "Start" : "Resume"}</button>}
+        {lifecycle === "active" && <button type="button" onClick={() => onLifecycle("completed")}><CircleCheckBig size={16} />Complete</button>}
+        {(lifecycle === "active" || lifecycle === "paused" || lifecycle === "draft") && <button type="button" onClick={() => onLifecycle("archived")}><Archive size={16} />Archive</button>}
+        {(lifecycle === "completed" || lifecycle === "archived" || lifecycle === "paused") && <button type="button" onClick={onRestart}><Play size={16} />Restart</button>}
+      </div>
+    </Phase2Sheet>
+  );
+}
+
+function LongTermGoalEditorSheet({ goal = null, activeGoals, onClose, onSave }) {
+  const [step, setStep] = useState(goal ? "configure" : "templates");
+  const [templateId, setTemplateId] = useState(goal?.templateId || LONG_TERM_GOAL_TEMPLATES[0].id);
+  const template = LONG_TERM_GOAL_TEMPLATES.find((item) => item.id === templateId) || LONG_TERM_GOAL_TEMPLATES[0];
+  const [label, setLabel] = useState(goal?.label || template.label);
+  const [target, setTarget] = useState(String(goal?.target ?? template.defaultTarget));
+  const [durationDays, setDurationDays] = useState(String(goal?.durationDays ?? template.defaultDurationDays));
+  const [trackedValue, setTrackedValue] = useState(goal?.trackedValue || "");
+  const targetValue = Number(target);
+  const duplicate = activeGoals.some((item) => item.id !== goal?.id
+    && item.templateId === template.id
+    && (!template.requiresValue || item.trackedValue.toLowerCase() === trackedValue.trim().toLowerCase()));
+  const valid = Number.isFinite(targetValue)
+    && targetValue > 0
+    && label.trim()
+    && (!template.requiresValue || trackedValue.trim())
+    && !duplicate;
+
+  useEffect(() => {
+    if (goal) return;
+    setLabel(template.label);
+    setTarget(String(template.defaultTarget));
+    setDurationDays(String(template.defaultDurationDays));
+    setTrackedValue("");
+  }, [goal, template.defaultDurationDays, template.defaultTarget, template.id, template.label]);
+
+  function chooseTemplate(id) {
+    setTemplateId(id);
+    setStep("configure");
+  }
+
+  function submit(event, status = goal?.status || "active") {
     event.preventDefault();
-    if (template.requiresValue && !trackedValue.trim()) return;
-    if (state.longTermGoals.some((goal) => goal.templateId === template.id && goal.trackedValue.toLowerCase() === trackedValue.trim().toLowerCase())) return;
-    const goal = createLongTermGoal(template.id, { target, trackedValue });
-    onChange((current) => ({ longTermGoals: [...current.longTermGoals, goal] }));
+    if (!valid) return;
+    onSave({
+      templateId: template.id,
+      label: label.trim(),
+      target: targetValue,
+      durationDays: Number(durationDays),
+      trackedValue: trackedValue.trim(),
+      status
+    });
+  }
+
+  if (step === "templates") {
+    return (
+      <Phase2Sheet titleId="long-term-goal-sheet-title" onClose={onClose} className="phase2-goal-editor-sheet">
+        <header className="phase2-sheet-header">
+          <div><span className="eyebrow">Add a direction</span><h2 id="long-term-goal-sheet-title">What would you like to follow?</h2><p>Choose one behavior. Ziya compares fixed periods only after enough evidence is available.</p></div>
+          <button type="button" onClick={onClose} aria-label="Close long-term goal setup"><X size={20} /></button>
+        </header>
+        <div className="phase2-template-list">
+          {LONG_TERM_GOAL_TEMPLATES.map((item) => {
+            const alreadyActive = !item.requiresValue && activeGoals.some((goalItem) => goalItem.templateId === item.id);
+            return (
+              <button type="button" key={item.id} disabled={alreadyActive} onClick={() => chooseTemplate(item.id)}>
+                <span className="phase2-template-icon target"><TrendingUp size={18} /></span>
+                <span><strong>{item.label}</strong><small>{item.defaultDurationDays}-day direction | {item.description}</small></span>
+                {alreadyActive ? <em>Tracking</em> : <ChevronRight size={18} />}
+              </button>
+            );
+          })}
+        </div>
+      </Phase2Sheet>
+    );
   }
 
   return (
-    <div className="stack phase2-view">
-      <section className="phase2-summary-band">
-        <div><span className="eyebrow">Long-term direction</span><h2>Consistency over perfection</h2><p>{summary.dataReadyCount ? `${summary.dataReadyCount} goals have enough activity for an early trend.` : "Trends become more useful as you log real choices over time."}</p></div>
-        <span className="phase2-summary-count"><strong>{summary.onTrackCount}</strong><small>on track</small></span>
-      </section>
-
-      {summary.goals.length ? <section className="phase2-panel"><div className="phase2-section-heading"><div><span className="eyebrow">Progress</span><h2>Long-term goals</h2></div><TrendingUp size={19} /></div><div className="phase2-goal-list">{summary.goals.map((goal) => <div className="phase2-goal-row" key={goal.id}><div className="phase2-goal-copy"><strong>{goal.label}</strong><small>{goal.hasData ? `${formatMetric(goal.value)} ${goal.unit}` : "Building a baseline"}</small></div><div className="phase2-progress" aria-hidden="true"><i style={{ width: `${goal.progress}%` }} /></div><span>{goal.detail}</span><button type="button" onClick={() => onChange((current) => createPhase2DeletionPatch(current, "longTermGoal", [goal.id], { longTermGoals: current.longTermGoals.filter((item) => item.id !== goal.id) }))} aria-label={`Remove ${goal.label}`}><Trash2 size={16} /></button></div>)}</div></section> : <section className="phase2-empty"><TrendingUp size={24} /><strong>No long-term goal yet</strong><p>Choose one direction and let the trend build from confirmed activity.</p></section>}
-
-      <form className="phase2-panel phase2-add-goal" onSubmit={addGoal}>
-        <div className="phase2-section-heading"><div><span className="eyebrow">Add a direction</span><h2>Track gradual progress</h2></div><Plus size={19} /></div>
-        <label><span>Goal</span><select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{LONG_TERM_GOAL_TEMPLATES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-        <p>{template.description}</p>
-        {template.requiresValue && <label><span>Ingredient to track</span><input value={trackedValue} onChange={(event) => setTrackedValue(event.target.value)} placeholder="Example: Red 40" required /></label>}
+    <Phase2Sheet titleId="long-term-goal-config-title" onClose={onClose} className="phase2-goal-editor-sheet">
+      <header className="phase2-sheet-header">
+        <button type="button" onClick={() => goal ? onClose() : setStep("templates")} aria-label={goal ? "Close editor" : "Back to direction choices"}><ArrowLeft size={20} /></button>
+        <div><span className="eyebrow">{goal ? "Edit direction" : "Set a stable period"}</span><h2 id="long-term-goal-config-title">{template.label}</h2></div>
+        <button type="button" onClick={onClose} aria-label="Close long-term goal editor"><X size={20} /></button>
+      </header>
+      <form className="phase2-guided-goal-form" onSubmit={submit}>
+        <div className="phase2-goal-rule target">
+          <span>Tracking period</span>
+          <strong>{durationDays} days at a time</strong>
+          <p>{template.description} Ziya compares equal-length periods and keeps closed evidence stable.</p>
+        </div>
+        <label><span>Goal name</span><input value={label} maxLength="100" onChange={(event) => setLabel(event.target.value)} required /></label>
+        {template.requiresValue && <label><span>Ingredient to track</span><input value={trackedValue} maxLength="100" onChange={(event) => setTrackedValue(event.target.value)} placeholder="Example: Red 40" required /></label>}
+        <label><span>Period length</span><select value={durationDays} onChange={(event) => setDurationDays(event.target.value)}>{getSupportedLongTermDurations().map((days) => <option key={days} value={days}>{days} days</option>)}</select></label>
         <label><span>Target</span><span className="phase2-number-input"><input type="number" inputMode="decimal" min="0.1" step="any" value={target} onChange={(event) => setTarget(event.target.value)} required /><em>{template.unit}</em></span></label>
-        <button className="primary-button" type="submit"><Plus size={18} />Add long-term goal</button>
+        <div className="phase2-what-counts"><Info size={17} /><span><strong>What counts</strong><small>Only confirmed entries with the fields needed for this metric count. Missing labels or nutrition remain incomplete.</small></span></div>
+        {duplicate && <p className="phase2-status" role="status">This direction is already active. Open the existing goal to edit it.</p>}
+        <button className="primary-button" type="submit" disabled={!valid}><Check size={18} />{goal ? "Save for current period" : "Start tracking"}</button>
+        {!goal && <button className="secondary-button" type="button" disabled={!valid} onClick={(event) => submit(event, "draft")}><Clock3 size={17} />Save as draft</button>}
       </form>
-
-      <section className="phase2-panel">
-        <div className="phase2-section-heading"><div><span className="eyebrow">Recent context</span><h2>Confirmed activity</h2></div><CalendarRange size={19} /></div>
-        {[...(state.restaurantMeals || []).map((meal) => ({ id: meal.id, title: meal.itemName, detail: `${meal.restaurantName} · ${meal.goalFit === "fits" ? "Fits current goals" : meal.goalFit === "watch" ? "Worth balancing" : "Needs menu details"}`, occurredAt: meal.occurredAt })), ...(state.activities || []).filter((item) => item.type !== "nudge_shown" && !(["food_logged", "soda_logged"].includes(item.type) && item.productId?.startsWith("restaurant-product:"))).map((item) => ({ id: item.id, title: item.type.replace(/_/g, " "), detail: item.source === "location-confirmed" ? "Location-confirmed" : "User-confirmed", occurredAt: item.occurredAt }))].sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt)).slice(0, 8).map((item) => <div className="phase2-simple-row" key={item.id}><span><strong>{item.title}</strong><small>{item.detail}</small></span><em>{new Date(item.occurredAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</em></div>)}
-        {!state.restaurantMeals.length && !state.activities.length && <div className="phase2-empty compact"><CalendarRange size={20} /><strong>No activity yet</strong><p>Confirmed meals and visits will appear here.</p></div>}
-      </section>
-    </div>
+    </Phase2Sheet>
   );
 }
 

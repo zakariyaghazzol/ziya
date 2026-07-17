@@ -1,16 +1,18 @@
 import { getLongTermGoalTemplate, getWeeklyGoalTemplate } from "../data/restaurantGoalRules";
 import { isSupportedLocationContext } from "../data/locationContextTypes";
 
-export const PHASE2_STORAGE_KEY = "ziya-context-layer-v2";
-export const PHASE2_LEGACY_STORAGE_KEYS = Object.freeze(["ziya-context-layer-v1"]);
-export const PHASE2_STATE_VERSION = 2;
+export const PHASE2_STORAGE_KEY = "ziya-context-layer-v3";
+export const PHASE2_LEGACY_STORAGE_KEYS = Object.freeze(["ziya-context-layer-v2", "ziya-context-layer-v1"]);
+export const PHASE2_STATE_VERSION = 3;
 
 const WEEKLY_GOAL_STATUSES = new Set(["draft", "active", "paused", "completed", "archived"]);
+const LONG_TERM_GOAL_STATUSES = new Set(["draft", "active", "paused", "completed", "archived"]);
 
 const MAX_ITEMS = Object.freeze({
   weeklyGoals: 20,
   weeklySnapshots: 104,
   longTermGoals: 20,
+  longTermSnapshots: 240,
   activities: 1000,
   restaurants: 100,
   restaurantMeals: 1000,
@@ -185,17 +187,91 @@ function sanitizeLongTermGoal(goal) {
   if (!template) return null;
   const target = number(goal.target, template.defaultTarget);
   const durationDays = number(goal.durationDays, template.defaultDurationDays);
+  const status = LONG_TERM_GOAL_STATUSES.has(goal.status)
+    ? goal.status
+    : goal.enabled === false ? "paused" : "active";
+  const createdAt = iso(goal.createdAt, new Date().toISOString());
   return {
     id: validId(goal.instanceId || goal.id, "long"),
+    parentGoalId: text(goal.parentGoalId, 120),
     templateId: template.id,
     label: text(goal.label, 100) || template.label,
     target: Math.max(0.1, target),
     durationDays: Math.min(365, Math.max(7, durationDays)),
     trackedValue: text(goal.trackedValue, 100),
-    enabled: goal.enabled !== false,
-    startDate: iso(goal.startDate, new Date().toISOString()),
-    createdAt: iso(goal.createdAt, new Date().toISOString()),
-    updatedAt: iso(goal.updatedAt, new Date().toISOString())
+    status,
+    enabled: status === "active",
+    ruleVersion: Math.max(1, Math.floor(number(goal.ruleVersion, 1))),
+    startDate: iso(goal.startDate, createdAt),
+    activatedAt: iso(goal.activatedAt, status === "active" ? createdAt : null),
+    pausedAt: iso(goal.pausedAt, status === "paused" ? iso(goal.updatedAt, createdAt) : null),
+    completedAt: iso(goal.completedAt, status === "completed" ? iso(goal.updatedAt, createdAt) : null),
+    archivedAt: iso(goal.archivedAt, status === "archived" ? iso(goal.updatedAt, createdAt) : null),
+    createdAt,
+    updatedAt: iso(goal.updatedAt, createdAt)
+  };
+}
+
+function sanitizeLongTermMetric(metric) {
+  if (!metric || typeof metric !== "object") return null;
+  return {
+    value: number(metric.value),
+    comparisonValue: number(metric.comparisonValue),
+    unit: text(metric.unit, 40),
+    comparisonUnit: text(metric.comparisonUnit, 60),
+    direction: ["lower", "higher"].includes(metric.direction) ? metric.direction : "higher",
+    insightType: ["frequency", "quality", "consistency"].includes(metric.insightType) ? metric.insightType : "consistency",
+    basisKey: text(metric.basisKey, 180),
+    basis: text(metric.basis, 120),
+    evidenceIds: asArray(metric.evidenceIds).map((id) => text(id, 180)).filter(Boolean).slice(0, 500),
+    evidenceCount: Math.max(0, number(metric.evidenceCount, 0)),
+    sampleCount: Math.max(0, number(metric.sampleCount, 0)),
+    missingCount: Math.max(0, number(metric.missingCount, 0)),
+    dayCount: Math.max(0, number(metric.dayCount, 0)),
+    minimumEvidence: Math.max(1, number(metric.minimumEvidence, 1)),
+    minimumDays: Math.max(1, number(metric.minimumDays, 1)),
+    meetsThreshold: Boolean(metric.meetsThreshold),
+    completeness: ["none", "sparse", "partial", "complete", "changed"].includes(metric.completeness) ? metric.completeness : "none",
+    completenessPercent: Math.min(100, Math.max(0, number(metric.completenessPercent, 0))),
+    matchedCount: Math.max(0, number(metric.matchedCount, 0)),
+    metricSummary: text(metric.metricSummary, 220),
+    periodStartKey: /^\d{4}-\d{2}-\d{2}$/.test(metric.periodStartKey) ? metric.periodStartKey : "",
+    periodEndKey: /^\d{4}-\d{2}-\d{2}$/.test(metric.periodEndKey) ? metric.periodEndKey : "",
+    startAt: iso(metric.startAt),
+    endAt: iso(metric.endAt),
+    dateRange: text(metric.dateRange, 120),
+    observedDays: Math.max(0, number(metric.observedDays, 0)),
+    closed: Boolean(metric.closed)
+  };
+}
+
+function sanitizeLongTermSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const template = getLongTermGoalTemplate(snapshot.templateId);
+  const goalId = text(snapshot.goalId, 120);
+  const periodStartKey = /^\d{4}-\d{2}-\d{2}$/.test(snapshot.periodStartKey) ? snapshot.periodStartKey : "";
+  const periodEndKey = /^\d{4}-\d{2}-\d{2}$/.test(snapshot.periodEndKey) ? snapshot.periodEndKey : "";
+  const metric = sanitizeLongTermMetric(snapshot.metric);
+  if (!template || !goalId || !periodStartKey || !periodEndKey || !metric) return null;
+  const evidence = asArray(snapshot.evidence).map(sanitizeSnapshotEvidence).filter(Boolean).slice(0, 500);
+  return {
+    id: "long-term-snapshot:" + goalId + ":" + periodStartKey,
+    goalId,
+    parentGoalId: text(snapshot.parentGoalId, 120),
+    templateId: template.id,
+    label: text(snapshot.label, 100) || template.label,
+    target: Math.max(0.1, number(snapshot.target, template.defaultTarget)),
+    trackedValue: text(snapshot.trackedValue, 100),
+    durationDays: Math.min(365, Math.max(7, number(snapshot.durationDays, template.defaultDurationDays))),
+    periodStartKey,
+    periodEndKey,
+    startAt: iso(snapshot.startAt),
+    endAt: iso(snapshot.endAt),
+    capturedAt: iso(snapshot.capturedAt, new Date().toISOString()),
+    immutable: true,
+    ruleVersion: Math.max(1, Math.floor(number(snapshot.ruleVersion, 1))),
+    metric: { ...metric, evidenceIds: evidence.map((item) => item.id), evidenceCount: evidence.length },
+    evidence
   };
 }
 
@@ -207,6 +283,7 @@ function sanitizeActivity(item) {
     id: validId(item.id, "activity"),
     type,
     occurredAt: iso(item.occurredAt, new Date().toISOString()),
+    updatedAt: iso(item.updatedAt, iso(item.occurredAt, new Date().toISOString())),
     source: ["manual", "location-confirmed", "restaurant", "receipt", "scan"].includes(item.source) ? item.source : "manual",
     placeId: text(item.placeId, 120),
     productId: text(item.productId, 160),
@@ -272,6 +349,7 @@ function sanitizeRestaurantMeal(item) {
     sourceNote: text(item.sourceNote, 300),
     goalFit: ["fits", "watch", "needs-data"].includes(item.goalFit) ? item.goalFit : "needs-data",
     occurredAt: iso(item.occurredAt, new Date().toISOString()),
+    updatedAt: iso(item.updatedAt, iso(item.occurredAt, new Date().toISOString())),
     addedToPlate: Boolean(item.addedToPlate),
     plateEntryId: text(item.plateEntryId, 160),
     receiptReviewId: text(item.receiptReviewId, 160),
@@ -362,7 +440,13 @@ export function migratePhase2State(value) {
       status: WEEKLY_GOAL_STATUSES.has(goal?.status) ? goal.status : goal?.enabled === false ? "paused" : "active",
       ruleVersion: Math.max(1, Math.floor(number(goal?.ruleVersion, 1)))
     })),
-    weeklySnapshots: asArray(value.weeklySnapshots)
+    weeklySnapshots: asArray(value.weeklySnapshots),
+    longTermGoals: asArray(value.longTermGoals).map((goal) => ({
+      ...goal,
+      status: LONG_TERM_GOAL_STATUSES.has(goal?.status) ? goal.status : goal?.enabled === false ? "paused" : "active",
+      ruleVersion: Math.max(1, Math.floor(number(goal?.ruleVersion, 1)))
+    })),
+    longTermSnapshots: asArray(value.longTermSnapshots)
   };
 }
 export function createEmptyPhase2State() {
@@ -372,6 +456,7 @@ export function createEmptyPhase2State() {
     weeklyGoals: [],
     weeklySnapshots: [],
     longTermGoals: [],
+    longTermSnapshots: [],
     activities: [],
     restaurants: [],
     restaurantMeals: [],
@@ -404,6 +489,7 @@ export function sanitizePhase2State(value) {
     weeklyGoals: limited(value.weeklyGoals, "weeklyGoals", sanitizeWeeklyGoal),
     weeklySnapshots: limited(value.weeklySnapshots, "weeklySnapshots", sanitizeWeeklySnapshot),
     longTermGoals: limited(value.longTermGoals, "longTermGoals", sanitizeLongTermGoal),
+    longTermSnapshots: limited(value.longTermSnapshots, "longTermSnapshots", sanitizeLongTermSnapshot),
     activities: limited(value.activities, "activities", sanitizeActivity),
     restaurants: limited(value.restaurants, "restaurants", sanitizeRestaurant),
     restaurantMeals: limited(value.restaurantMeals, "restaurantMeals", sanitizeRestaurantMeal),
@@ -479,7 +565,7 @@ function mergeById(localItems, cloudItems, limit) {
     .slice(0, limit);
 }
 
-function mergeImmutableSnapshots(localItems, cloudItems, limit) {
+function mergeWeeklySnapshots(localItems, cloudItems, limit) {
   const values = new Map();
   asArray(cloudItems).forEach((item) => {
     if (item?.weekStartKey) values.set(item.weekStartKey, item);
@@ -491,6 +577,19 @@ function mergeImmutableSnapshots(localItems, cloudItems, limit) {
     .sort((a, b) => String(b.weekStartKey).localeCompare(String(a.weekStartKey)))
     .slice(0, limit);
 }
+function mergeLongTermSnapshots(localItems, cloudItems, limit) {
+  const values = new Map();
+  asArray(cloudItems).forEach((item) => {
+    if (item?.id) values.set(item.id, item);
+  });
+  asArray(localItems).forEach((item) => {
+    if (item?.id) values.set(item.id, item);
+  });
+  return [...values.values()]
+    .sort((a, b) => String(b.periodStartKey).localeCompare(String(a.periodStartKey)))
+    .slice(0, limit);
+}
+
 function filterDeleted(items, kind, deletedItems) {
   const tombstones = new Map(deletedItems.filter((item) => item.kind === kind).map((item) => [item.targetId, item]));
   return items.filter((item) => {
@@ -522,8 +621,9 @@ export function mergePhase2States(localValue, cloudValue) {
   return sanitizePhase2State({
     ...newest,
     weeklyGoals: filterDeleted(mergeById(local.weeklyGoals, cloud.weeklyGoals, MAX_ITEMS.weeklyGoals), "weeklyGoal", deletedItems),
-    weeklySnapshots: mergeImmutableSnapshots(local.weeklySnapshots, cloud.weeklySnapshots, MAX_ITEMS.weeklySnapshots),
+    weeklySnapshots: mergeWeeklySnapshots(local.weeklySnapshots, cloud.weeklySnapshots, MAX_ITEMS.weeklySnapshots),
     longTermGoals: filterDeleted(mergeById(local.longTermGoals, cloud.longTermGoals, MAX_ITEMS.longTermGoals), "longTermGoal", deletedItems),
+    longTermSnapshots: mergeLongTermSnapshots(local.longTermSnapshots, cloud.longTermSnapshots, MAX_ITEMS.longTermSnapshots),
     activities: filterDeleted(mergeById(local.activities, cloud.activities, MAX_ITEMS.activities), "activity", deletedItems),
     restaurants: filterDeleted(mergeById(local.restaurants, cloud.restaurants, MAX_ITEMS.restaurants), "restaurant", deletedItems),
     restaurantMeals: filterDeleted(mergeById(local.restaurantMeals, cloud.restaurantMeals, MAX_ITEMS.restaurantMeals), "restaurantMeal", deletedItems),

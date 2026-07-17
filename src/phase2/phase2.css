@@ -1522,6 +1522,7 @@ body.phase2-sheet-open {
   gap: 11px;
   align-items: center;
   padding: 11px 18px;
+  border: 0;
   border-top: 1px solid var(--line);
   color: var(--ink);
   background: #fff;
@@ -1898,6 +1899,523 @@ body.phase2-sheet-open {
   from { opacity: 0.75; transform: translateY(36px); }
   to { opacity: 1; transform: translateY(0); }
 }
+.phase2-trends-view {
+  gap: 14px;
+}
+
+.phase2-trend-intro {
+  min-height: 112px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 58px;
+  gap: 12px;
+  align-items: center;
+  padding: 17px;
+  border: 1px solid rgba(47, 159, 107, 0.14);
+  border-radius: 22px;
+  background: linear-gradient(135deg, #f4faf5 0%, #ffffff 72%);
+  box-shadow: 0 12px 30px rgba(26, 57, 38, 0.06);
+}
+
+.phase2-trend-intro-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  color: #fff;
+  background: var(--green);
+  box-shadow: 0 8px 18px rgba(47, 159, 107, 0.2);
+}
+
+.phase2-trend-intro h2 {
+  margin: 3px 0 0;
+  font-size: 1.08rem;
+  line-height: 1.18;
+}
+
+.phase2-trend-intro p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.67rem;
+  line-height: 1.42;
+}
+
+.phase2-trend-ready-count {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  border: 1px solid rgba(47, 159, 107, 0.17);
+  border-radius: 18px;
+  color: var(--green-dark);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.phase2-trend-ready-count strong,
+.phase2-trend-ready-count small {
+  display: block;
+}
+
+.phase2-trend-ready-count strong {
+  font-size: 1.12rem;
+  line-height: 1;
+}
+
+.phase2-trend-ready-count small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.54rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.phase2-trend-section {
+  display: grid;
+  gap: 10px;
+}
+
+.phase2-trend-card-list {
+  display: grid;
+  gap: 10px;
+}
+
+.phase2-trend-card {
+  --trend-color: #9aa69f;
+  width: 100%;
+  min-height: 154px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 18px;
+  gap: 11px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 19px;
+  color: var(--ink);
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(19, 36, 25, 0.055);
+  text-align: left;
+  transition: transform 110ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.phase2-trend-card.status-improving {
+  --trend-color: var(--green);
+}
+
+.phase2-trend-card.status-steady {
+  --trend-color: #6a8d79;
+}
+
+.phase2-trend-card.status-watch {
+  --trend-color: #d28d45;
+}
+
+.phase2-trend-card.status-building,
+.phase2-trend-card.status-needs-data {
+  --trend-color: #9da8a1;
+}
+
+.phase2-trend-card:active {
+  transform: scale(0.987);
+}
+
+.phase2-trend-card:focus-visible {
+  outline: 3px solid rgba(47, 159, 107, 0.18);
+  outline-offset: 2px;
+}
+
+.phase2-trend-card-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: #fff;
+  background: var(--trend-color);
+}
+
+.phase2-trend-card-main {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.phase2-trend-card-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.phase2-trend-card-title strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.79rem;
+  line-height: 1.22;
+}
+
+.phase2-trend-card-title em {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: #526059;
+  background: #eef2ef;
+  font-size: 0.53rem;
+  font-style: normal;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.status-improving .phase2-trend-card-title em {
+  color: #226a48;
+  background: #e4f3e8;
+}
+
+.status-watch .phase2-trend-card-title em {
+  color: #81551b;
+  background: #fff0d1;
+}
+
+.phase2-trend-card-copy {
+  color: #66736c;
+  font-size: 0.63rem;
+  line-height: 1.43;
+}
+
+.phase2-trend-comparison {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(58px, 1fr) 54px minmax(58px, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 13px;
+  background: #f5f7f5;
+}
+
+.phase2-trend-comparison > span {
+  min-width: 0;
+}
+
+.phase2-trend-comparison > span:last-child {
+  text-align: right;
+}
+
+.phase2-trend-comparison small,
+.phase2-trend-comparison strong {
+  display: block;
+}
+
+.phase2-trend-comparison small {
+  color: var(--muted);
+  font-size: 0.5rem;
+  font-weight: 800;
+}
+
+.phase2-trend-comparison strong {
+  margin-top: 2px;
+  font-size: 0.76rem;
+}
+
+.phase2-trend-comparison > i {
+  height: 5px;
+  position: relative;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe5e1;
+}
+
+.phase2-trend-comparison > i > span {
+  width: 58%;
+  height: 100%;
+  display: block;
+  margin-left: auto;
+  border-radius: inherit;
+  background: var(--trend-color);
+}
+
+.phase2-trend-baseline {
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: auto minmax(62px, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 13px;
+  background: #f5f7f5;
+}
+
+.phase2-trend-baseline > span strong,
+.phase2-trend-baseline > span small {
+  display: block;
+}
+
+.phase2-trend-baseline > span strong {
+  font-size: 0.75rem;
+}
+
+.phase2-trend-baseline > span small,
+.phase2-trend-baseline > small {
+  color: var(--muted);
+  font-size: 0.5rem;
+}
+
+.phase2-trend-baseline > i {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe5e1;
+}
+
+.phase2-trend-baseline > i > span {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: var(--trend-color);
+}
+
+.phase2-trend-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #7a867f;
+  font-size: 0.55rem;
+  font-weight: 750;
+}
+
+.phase2-trend-card-meta i {
+  margin-left: auto;
+  color: #69766f;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.phase2-trend-card-chevron {
+  align-self: center;
+  color: #9ba59f;
+}
+
+.phase2-trend-disclosure,
+.phase2-trend-caveat {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  padding: 0 4px;
+  color: #758079;
+  font-size: 0.59rem;
+  line-height: 1.42;
+}
+
+.phase2-trend-disclosure svg,
+.phase2-trend-caveat svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.phase2-guided-goal-form > label > select {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  outline: none;
+  color: var(--ink);
+  background: #fafbfa;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.phase2-trend-period-comparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
+  align-items: stretch;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.phase2-trend-period-comparison > div {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 15px;
+  background: #f4f6f5;
+}
+
+.phase2-trend-period-comparison > div.ready {
+  background: #edf7ef;
+}
+
+.phase2-trend-period-comparison span,
+.phase2-trend-period-comparison strong,
+.phase2-trend-period-comparison small,
+.phase2-trend-period-comparison em {
+  display: block;
+}
+
+.phase2-trend-period-comparison > div > span {
+  color: var(--muted);
+  font-size: 0.52rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.phase2-trend-period-comparison > div > strong {
+  margin-top: 5px;
+  font-size: 1rem;
+}
+
+.phase2-trend-period-comparison > div > small {
+  margin-top: 1px;
+  color: #58665e;
+  font-size: 0.55rem;
+  line-height: 1.3;
+}
+
+.phase2-trend-period-comparison > div > em {
+  margin-top: 7px;
+  color: #7b867f;
+  font-size: 0.52rem;
+  font-style: normal;
+}
+
+.phase2-trend-period-arrow {
+  display: grid;
+  place-items: center;
+  color: #9ba59f;
+}
+
+.phase2-trend-quality {
+  display: grid;
+  border-bottom: 1px solid var(--line);
+}
+
+.phase2-trend-quality > div {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.phase2-trend-quality > div:first-child {
+  border-top: 0;
+}
+
+.phase2-trend-quality strong,
+.phase2-trend-quality small {
+  display: block;
+}
+
+.phase2-trend-quality strong {
+  font-size: 0.68rem;
+}
+
+.phase2-trend-quality small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.58rem;
+}
+
+.phase2-trend-quality em {
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: #59665f;
+  background: #edf1ee;
+  font-size: 0.53rem;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.phase2-trend-previous-evidence,
+.phase2-trend-history {
+  border-bottom: 1px solid var(--line);
+}
+
+.phase2-trend-previous-evidence > summary,
+.phase2-trend-history > summary,
+.phase2-trend-history > div > details > summary {
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  gap: 10px;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+}
+
+.phase2-trend-previous-evidence > summary::-webkit-details-marker,
+.phase2-trend-history summary::-webkit-details-marker {
+  display: none;
+}
+
+.phase2-trend-previous-evidence summary strong,
+.phase2-trend-previous-evidence summary small,
+.phase2-trend-history summary strong,
+.phase2-trend-history summary small {
+  display: block;
+}
+
+.phase2-trend-previous-evidence summary strong,
+.phase2-trend-history summary strong {
+  font-size: 0.69rem;
+}
+
+.phase2-trend-previous-evidence summary small,
+.phase2-trend-history summary small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.57rem;
+}
+
+.phase2-trend-previous-evidence[open] > summary > svg,
+.phase2-trend-history[open] > summary > svg,
+.phase2-trend-history > div > details[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
+.phase2-trend-previous-evidence > .phase2-evidence-list,
+.phase2-trend-history > div {
+  padding-bottom: 12px;
+}
+
+.phase2-trend-history > div > details {
+  border-top: 1px solid var(--line);
+}
+
+.phase2-trend-history > div > details > summary {
+  min-height: 54px;
+  padding-left: 6px;
+}
+
+.phase2-trend-history > div > details > .phase2-evidence-list {
+  padding: 0 6px 10px;
+}
+
+.phase2-trend-caveat {
+  margin-top: 14px;
+  padding: 11px;
+  border-radius: 13px;
+  background: #f3f6f4;
+}
+
+.phase2-evidence-delete {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  color: #9a4b43;
+  background: #fbeceb;
+  transition: transform 100ms ease, background 160ms ease;
+}
+
+.phase2-evidence-delete:active {
+  transform: scale(0.95);
+}
+
 @media (max-width: 370px) {
   .phase2-week-intro {
     grid-template-columns: 40px minmax(0, 1fr);
@@ -1987,6 +2505,54 @@ body.phase2-sheet-open {
   }
 }
 
+@media (max-width: 370px) {
+  .phase2-trend-intro {
+    grid-template-columns: 42px minmax(0, 1fr) 52px;
+    gap: 9px;
+    padding: 14px;
+  }
+
+  .phase2-trend-intro-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+  }
+
+  .phase2-trend-ready-count {
+    width: 52px;
+    height: 52px;
+    border-radius: 16px;
+  }
+
+  .phase2-trend-card {
+    grid-template-columns: 40px minmax(0, 1fr) 16px;
+    gap: 9px;
+    padding: 12px;
+  }
+
+  .phase2-trend-card-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .phase2-trend-card-title {
+    display: grid;
+    justify-items: start;
+  }
+
+  .phase2-trend-comparison {
+    grid-template-columns: minmax(48px, 1fr) 38px minmax(48px, 1fr);
+    padding-inline: 8px;
+  }
+
+  .phase2-trend-period-comparison {
+    grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
+  }
+
+  .phase2-trend-period-comparison > div {
+    padding: 10px 8px;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .phase2-tabs button,
   .phase2-progress i,
@@ -1996,6 +2562,7 @@ body.phase2-sheet-open {
   .phase2-entry,
   .plate-context-link,
   .phase2-week-goal-card,
+  .phase2-trend-card,
   .phase2-add-goal-wide,
   .phase2-template-list button,
   .phase2-goal-actions button,
