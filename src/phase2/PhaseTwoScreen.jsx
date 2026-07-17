@@ -1,15 +1,24 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertCircle,
+  Archive,
   ArrowLeft,
   CalendarRange,
   Camera,
   Check,
+  ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  CircleCheckBig,
+  Clock3,
   Dumbbell,
+  Edit3,
   FileText,
   Info,
   MapPin,
   Navigation,
+  Pause,
+  Play,
   Plus,
   ReceiptText,
   ShieldCheck,
@@ -35,7 +44,17 @@ import { createPhase2DeletionPatch, createPhase2Id, touchPhase2State } from "../
 import { canUseBrowserTextRecognition, extractReceiptTextFromImage } from "../lib/receiptOcr";
 import { parseReceiptText, receiptConfidenceCopy } from "../lib/receiptParser";
 import { rankMenuItemsForGoals as rankMenuItems } from "../lib/goalFitAnalyzer";
-import { buildWeeklyGoalSummary, createWeeklyGoal, formatMetric } from "../lib/weeklyGoalEngine";
+import {
+  buildWeeklyGoalSummary,
+  createWeeklyGoal,
+  formatMetric,
+  getWeekWindowFromKey,
+  materializeClosedWeeklySnapshots,
+  shiftWeekWindow,
+  summaryFromWeeklySnapshot,
+  transitionWeeklyGoal,
+  updateWeeklyGoal
+} from "../lib/weeklyGoalEngine";
 import "./phase2.css";
 
 const VIEWS = [
@@ -85,6 +104,12 @@ function cleanList(value) {
 
 function formatDateRange(window) {
   return `${window.start.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${new Date(window.end.getTime() - 1).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+}
+
+function formatEvidenceValue(item) {
+  if (item.missing) return "Missing";
+  if (item.sourceType === "plate-day") return Number(item.value) >= 1 ? "Goal reached" : "Below goal";
+  return item.value === null ? "Confirmed" : `${formatMetric(item.value)} ${item.unit}`;
 }
 
 function buildMenuItem(form) {
@@ -236,7 +261,7 @@ export default function PhaseTwoScreen({
         </section>
       )}
 
-      {view === "week" && <WeeklyGoalsPanel state={phase2State} summary={weeklySummary} onChange={update} />}
+      {view === "week" && <WeeklyGoalsPanel state={phase2State} plateState={plateState} summary={weeklySummary} onChange={update} />}
       {view === "places" && (
         <PlacesPanel
           state={phase2State}
@@ -264,54 +289,390 @@ export default function PhaseTwoScreen({
     </div>
   );
 }
-function WeeklyGoalsPanel({ state, summary, onChange }) {
-  const [templateId, setTemplateId] = useState(WEEKLY_GOAL_TEMPLATES[0].id);
-  const template = WEEKLY_GOAL_TEMPLATES.find((item) => item.id === templateId);
-  const [target, setTarget] = useState(String(template.defaultTarget));
+function WeeklyGoalsPanel({ state, plateState, summary, onChange }) {
+  const currentStartKey = summary.window.startKey;
+  const [selectedStartKey, setSelectedStartKey] = useState(currentStartKey);
+  const [sheet, setSheet] = useState(null);
+  const returnFocusRef = useRef(null);
+  const snapshots = state.weeklySnapshots || [];
+  const snapshotSignature = snapshots.map((item) => item.weekStartKey).sort().join("|");
 
-  useEffect(() => setTarget(String(template.defaultTarget)), [template.id]);
+  useEffect(() => {
+    setSelectedStartKey(currentStartKey);
+  }, [currentStartKey]);
 
-  function addGoal(event) {
-    event.preventDefault();
-    if (state.weeklyGoals.some((goal) => goal.templateId === template.id)) return;
-    const goal = createWeeklyGoal(template.id, { target });
-    onChange((current) => ({ weeklyGoals: [...current.weeklyGoals, goal] }));
+  useEffect(() => {
+    const next = materializeClosedWeeklySnapshots({ phase2State: state, plateState });
+    const nextSignature = next.map((item) => item.weekStartKey).sort().join("|");
+    if (nextSignature === snapshotSignature) return;
+    onChange((current) => ({
+      weeklySnapshots: materializeClosedWeeklySnapshots({ phase2State: current, plateState })
+    }));
+  }, [currentStartKey, plateState, snapshotSignature, state, onChange]);
+
+  const inactiveDefinitions = useMemo(
+    () => state.weeklyGoals.filter((goal) => (goal.status || (goal.enabled === false ? "paused" : "active")) !== "active"),
+    [state.weeklyGoals]
+  );
+  const inactiveSummary = useMemo(
+    () => buildWeeklyGoalSummary({ phase2State: state, plateState, goals: inactiveDefinitions }),
+    [inactiveDefinitions, plateState, state]
+  );
+  const inactiveById = useMemo(
+    () => new Map(inactiveDefinitions.map((goal) => [goal.id, goal])),
+    [inactiveDefinitions]
+  );
+  const snapshot = snapshots.find((item) => item.weekStartKey === selectedStartKey) || null;
+  const isCurrent = selectedStartKey === currentStartKey;
+  const selectedWindow = getWeekWindowFromKey(selectedStartKey);
+  const visibleSummary = isCurrent
+    ? summary
+    : summaryFromWeeklySnapshot(snapshot) || {
+      window: selectedWindow,
+      goals: [],
+      summary: "No saved recap is available for this week.",
+      evidenceGoalCount: 0,
+      partialGoalCount: 0,
+      isSnapshot: true
+    };
+  const previousWindow = shiftWeekWindow(summary.window, -1);
+  const earliestStartKey = [...snapshots.map((item) => item.weekStartKey), previousWindow.startKey]
+    .sort()[0];
+  const canGoPrevious = selectedStartKey > earliestStartKey;
+  const canGoNext = selectedStartKey < currentStartKey;
+  const detailGoal = sheet?.type === "detail"
+    ? [...visibleSummary.goals, ...inactiveSummary.goals].find((goal) => goal.id === sheet.goalId) || null
+    : null;
+
+  function openSheet(next) {
+    returnFocusRef.current = document.activeElement;
+    setSheet(next);
   }
 
+  function closeSheet() {
+    setSheet(null);
+    window.requestAnimationFrame(() => returnFocusRef.current?.focus?.());
+  }
+
+  function navigateWeek(direction) {
+    const next = shiftWeekWindow(getWeekWindowFromKey(selectedStartKey), direction);
+    if (next.startKey > currentStartKey || next.startKey < earliestStartKey) return;
+    setSelectedStartKey(next.startKey);
+    setSheet(null);
+  }
+
+  function persistWithClosedWeeks(updater) {
+    onChange((current) => {
+      const weeklySnapshots = materializeClosedWeeklySnapshots({ phase2State: current, plateState });
+      return { weeklySnapshots, weeklyGoals: updater(current.weeklyGoals) };
+    });
+  }
+
+  function saveGoal(values, existingGoal = null) {
+    persistWithClosedWeeks((goals) => {
+      if (!existingGoal) {
+        const created = createWeeklyGoal(values.templateId, values);
+        return created ? [...goals, created] : goals;
+      }
+      return goals.map((goal) => {
+        if (goal.id !== existingGoal.id) return goal;
+        let next = updateWeeklyGoal(goal, values);
+        if (values.status && values.status !== next.status) next = transitionWeeklyGoal(next, values.status);
+        return next;
+      });
+    });
+    closeSheet();
+  }
+
+  function setLifecycle(goalId, status) {
+    persistWithClosedWeeks((goals) => goals.map((goal) => goal.id === goalId ? transitionWeeklyGoal(goal, status) : goal));
+    closeSheet();
+  }
+
+  function openEdit(goalId) {
+    const definition = state.weeklyGoals.find((goal) => goal.id === goalId);
+    if (definition) setSheet({ type: "edit", goalId });
+  }
+
+  const unavailableTemplateIds = new Set(state.weeklyGoals
+    .filter((goal) => (goal.status || "active") !== "archived")
+    .map((goal) => goal.templateId));
+
   return (
-    <div className="stack phase2-view">
-      <section className="phase2-summary-band">
-        <div><span className="eyebrow">{formatDateRange(summary.window)}</span><h2>A flexible week</h2><p>{summary.goals.length ? `${summary.onTrackCount} of ${summary.goals.length} goals have room or are reached.` : "Choose a few goals that reflect the pattern you want to build."}</p></div>
-        <span className="phase2-summary-count"><strong>{summary.goals.length}</strong><small>active</small></span>
+    <div className="stack phase2-view phase2-week-view">
+      <section className="phase2-week-hero" aria-live="polite">
+        <div className="phase2-week-navigation">
+          <button type="button" onClick={() => navigateWeek(-1)} disabled={!canGoPrevious} aria-label="Previous week"><ChevronLeft size={18} /></button>
+          <div>
+            <span className="eyebrow">{isCurrent ? "Current week" : "Saved recap"}</span>
+            <strong>{formatDateRange(visibleSummary.window)}</strong>
+          </div>
+          <button type="button" onClick={() => navigateWeek(1)} disabled={!canGoNext} aria-label="Next week"><ChevronRight size={18} /></button>
+        </div>
+        <div className="phase2-week-intro">
+          <span className="phase2-week-icon"><CalendarRange size={20} /></span>
+          <div>
+            <h2>{isCurrent ? "Your week at a glance" : "Your saved week"}</h2>
+            <p>{visibleSummary.summary}</p>
+          </div>
+        </div>
+        {!isCurrent && <p className="phase2-readonly-note"><ShieldCheck size={15} />Closed weeks are read-only and keep the evidence captured at close.</p>}
       </section>
 
-      {summary.goals.length ? (
-        <section className="phase2-panel">
-          <div className="phase2-section-heading"><div><span className="eyebrow">Progress</span><h2>This week</h2></div><Target size={19} /></div>
-          <div className="phase2-goal-list">
-            {summary.goals.map((goal) => (
-              <div className="phase2-goal-row" key={goal.id}>
-                <div className="phase2-goal-copy"><strong>{goal.label}</strong><small>{formatMetric(goal.current)} of {formatMetric(goal.target)} {goal.unit}{goal.partial ? " · Partial total" : ""}</small></div>
-                <div className="phase2-progress" aria-hidden="true"><i style={{ width: `${goal.progress}%` }} /></div>
-                <span>{goal.summary}</span>
-                <button type="button" onClick={() => onChange((current) => createPhase2DeletionPatch(current, "weeklyGoal", [goal.id], { weeklyGoals: current.weeklyGoals.filter((item) => item.id !== goal.id) }))} aria-label={`Remove ${goal.label}`}><Trash2 size={16} /></button>
-              </div>
+      {visibleSummary.goals.length > 0 ? (
+        <section className="phase2-week-goals" aria-label={isCurrent ? "Active weekly goals" : "Saved weekly goals"}>
+          <div className="phase2-list-heading">
+            <div><span className="eyebrow">{isCurrent ? "Active goals" : "Weekly recap"}</span><h2>{isCurrent ? "Progress from confirmed choices" : "Evidence saved for this week"}</h2></div>
+            {isCurrent && <button type="button" className="phase2-add-goal-trigger" onClick={() => openSheet({ type: "add" })}><Plus size={17} />Add goal</button>}
+          </div>
+          <div className="phase2-week-card-list">
+            {visibleSummary.goals.map((goal) => (
+              <button type="button" className={`phase2-week-goal-card status-${goal.status}`} key={goal.id} onClick={() => openSheet({ type: "detail", goalId: goal.id })}>
+                <span className="phase2-week-goal-icon"><Target size={18} /></span>
+                <span className="phase2-week-goal-main">
+                  <span className="phase2-week-goal-title"><strong>{goal.label}</strong><em>{goal.statusLabel}</em></span>
+                  <span className="phase2-week-goal-value">
+                    {goal.hasEvidence ? formatMetric(goal.current) : "No confirmed entries"}
+                    <small>{goal.hasEvidence ? ` of ${formatMetric(goal.target)} ${goal.unit}` : `${goal.directionLabel} ${formatMetric(goal.target)} ${goal.unit}`}</small>
+                  </span>
+                  <span className="phase2-progress" aria-hidden="true"><i style={{ width: `${goal.hasEvidence ? goal.progress : 0}%` }} /></span>
+                  <span className="phase2-week-goal-summary">{goal.summary}</span>
+                </span>
+                <ChevronRight className="phase2-week-goal-chevron" size={18} />
+              </button>
             ))}
           </div>
         </section>
       ) : (
-        <section className="phase2-empty"><Target size={24} /><strong>Build your week</strong><p>Weekly goals give single meals more context without turning a day into pass or fail.</p></section>
+        <section className="phase2-empty phase2-week-empty">
+          <Target size={25} />
+          <strong>{isCurrent ? "Build a week that fits real life" : "No goals were saved for this week"}</strong>
+          <p>{isCurrent ? "Choose one signal to start. Ziya counts only confirmed logs, scans, meals, and visits." : "Historical weeks appear after a tracked week closes."}</p>
+          {isCurrent && <button type="button" className="primary-button" onClick={() => openSheet({ type: "add" })}><Plus size={18} />Add a weekly goal</button>}
+        </section>
       )}
 
-      <form className="phase2-panel phase2-add-goal" onSubmit={addGoal}>
-        <div className="phase2-section-heading"><div><span className="eyebrow">Add a goal</span><h2>Choose one useful signal</h2></div><Plus size={19} /></div>
-        <label><span>Goal</span><select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{WEEKLY_GOAL_TEMPLATES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-        <p>{template.description}</p>
-        <label><span>Weekly target</span><span className="phase2-number-input"><input type="number" inputMode="decimal" min="0.1" step="any" value={target} onChange={(event) => setTarget(event.target.value)} required /><em>{template.unit}</em></span></label>
-        <button className="primary-button" type="submit" disabled={state.weeklyGoals.some((goal) => goal.templateId === template.id)}><Plus size={18} />{state.weeklyGoals.some((goal) => goal.templateId === template.id) ? "Already tracking" : "Add weekly goal"}</button>
-      </form>
+      {isCurrent && visibleSummary.goals.length > 0 && (
+        <button type="button" className="phase2-add-goal-wide" onClick={() => openSheet({ type: "add" })}><Plus size={18} /><span><strong>Add another goal</strong><small>Choose a target or a flexible limit</small></span><ChevronRight size={18} /></button>
+      )}
+
+      {isCurrent && inactiveSummary.goals.length > 0 && (
+        <details className="phase2-lifecycle-disclosure">
+          <summary><span><Clock3 size={18} /><strong>Saved goal states</strong><small>{inactiveSummary.goals.length} draft, paused, completed, or archived</small></span><ChevronDown size={18} /></summary>
+          <div className="phase2-lifecycle-list">
+            {inactiveSummary.goals.map((goal) => {
+              const definition = inactiveById.get(goal.id);
+              const status = definition?.status || "paused";
+              return (
+                <button type="button" key={goal.id} onClick={() => openSheet({ type: "detail", goalId: goal.id })}>
+                  <span><strong>{goal.label}</strong><small>{status.charAt(0).toUpperCase() + status.slice(1)} | {goal.directionLabel} {formatMetric(goal.target)} {goal.unit}</small></span>
+                  <ChevronRight size={17} />
+                </button>
+              );
+            })}
+          </div>
+        </details>
+      )}
+
+      {sheet?.type === "add" && (
+        <WeeklyGoalEditorSheet
+          unavailableTemplateIds={unavailableTemplateIds}
+          onClose={closeSheet}
+          onSave={(values) => saveGoal(values)}
+        />
+      )}
+      {sheet?.type === "edit" && (() => {
+        const goal = state.weeklyGoals.find((item) => item.id === sheet.goalId);
+        return goal ? (
+          <WeeklyGoalEditorSheet
+            goal={goal}
+            unavailableTemplateIds={unavailableTemplateIds}
+            onClose={closeSheet}
+            onSave={(values) => saveGoal(values, goal)}
+          />
+        ) : null;
+      })()}
+      {sheet?.type === "detail" && detailGoal && (
+        <WeeklyGoalDetailSheet
+          goal={detailGoal}
+          definition={state.weeklyGoals.find((item) => item.id === detailGoal.id)}
+          historical={!isCurrent}
+          onClose={closeSheet}
+          onEdit={() => openEdit(detailGoal.id)}
+          onLifecycle={(status) => setLifecycle(detailGoal.id, status)}
+        />
+      )}
     </div>
   );
+}
+
+function Phase2Sheet({ titleId, children, onClose, className = "" }) {
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    document.body.classList.add("phase2-sheet-open");
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.classList.remove("phase2-sheet-open");
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="phase2-sheet-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section ref={dialogRef} tabIndex={-1} className={`phase2-sheet ${className}`} role="dialog" aria-modal="true" aria-labelledby={titleId} onPointerDown={(event) => event.stopPropagation()}>
+        <span className="phase2-sheet-handle" aria-hidden="true" />
+        {children}
+      </section>
+    </div>
+  );
+}
+
+function WeeklyGoalEditorSheet({ goal = null, unavailableTemplateIds, onClose, onSave }) {
+  const [step, setStep] = useState(goal ? "configure" : "templates");
+  const [templateId, setTemplateId] = useState(goal?.templateId || WEEKLY_GOAL_TEMPLATES[0].id);
+  const template = WEEKLY_GOAL_TEMPLATES.find((item) => item.id === templateId) || WEEKLY_GOAL_TEMPLATES[0];
+  const [target, setTarget] = useState(String(goal?.target ?? template.defaultTarget));
+  const [label, setLabel] = useState(goal?.label || template.label);
+  const targetValue = Number(target);
+  const valid = Number.isFinite(targetValue) && targetValue > 0;
+
+  useEffect(() => {
+    if (goal) return;
+    setTarget(String(template.defaultTarget));
+    setLabel(template.label);
+  }, [goal, template.id, template.defaultTarget, template.label]);
+
+  function chooseTemplate(id) {
+    setTemplateId(id);
+    setStep("configure");
+  }
+
+  function submit(event, status = goal?.status || "active") {
+    event.preventDefault();
+    if (!valid) return;
+    onSave({ templateId: template.id, target: targetValue, label, status });
+  }
+
+  if (step === "templates") {
+    return (
+      <Phase2Sheet titleId="weekly-goal-sheet-title" onClose={onClose} className="phase2-goal-editor-sheet">
+        <header className="phase2-sheet-header">
+          <div><span className="eyebrow">Add a goal</span><h2 id="weekly-goal-sheet-title">What would help this week?</h2><p>Start with one signal. You can pause or change it later.</p></div>
+          <button type="button" onClick={onClose} aria-label="Close goal setup"><X size={20} /></button>
+        </header>
+        <div className="phase2-template-list">
+          {WEEKLY_GOAL_TEMPLATES.map((item) => {
+            const unavailable = unavailableTemplateIds.has(item.id);
+            const isLimit = item.direction === "limit" || item.direction === "average-limit";
+            return (
+              <button type="button" key={item.id} disabled={unavailable} onClick={() => chooseTemplate(item.id)}>
+                <span className={`phase2-template-icon ${isLimit ? "limit" : "target"}`}><Target size={18} /></span>
+                <span><strong>{item.label}</strong><small>{isLimit ? "Flexible weekly limit" : "Weekly target"} | {item.description}</small></span>
+                {unavailable ? <em>Tracking</em> : <ChevronRight size={18} />}
+              </button>
+            );
+          })}
+        </div>
+      </Phase2Sheet>
+    );
+  }
+
+  const isLimit = template.direction === "limit" || template.direction === "average-limit";
+  return (
+    <Phase2Sheet titleId="weekly-goal-config-title" onClose={onClose} className="phase2-goal-editor-sheet">
+      <header className="phase2-sheet-header">
+        <button type="button" onClick={() => goal ? onClose() : setStep("templates")} aria-label={goal ? "Close editor" : "Back to goal choices"}><ArrowLeft size={20} /></button>
+        <div><span className="eyebrow">{goal ? "Edit goal" : "Set your week"}</span><h2 id="weekly-goal-config-title">{template.label}</h2></div>
+        <button type="button" onClick={onClose} aria-label="Close goal editor"><X size={20} /></button>
+      </header>
+      <form className="phase2-guided-goal-form" onSubmit={submit}>
+        <div className={`phase2-goal-rule ${isLimit ? "limit" : "target"}`}>
+          <span>{isLimit ? "Weekly limit" : "Weekly target"}</span>
+          <strong>{isLimit ? "Stay at or below" : "Reach at least"} {formatMetric(targetValue || template.defaultTarget)} {template.unit}</strong>
+          <p>{template.description} Only confirmed supporting entries count.</p>
+        </div>
+        <label><span>Goal name</span><input value={label} maxLength="100" onChange={(event) => setLabel(event.target.value)} required /></label>
+        <label><span>{isLimit ? "Maximum for the week" : "Target for the week"}</span><span className="phase2-number-input"><input type="number" inputMode="decimal" min="0.1" step="any" value={target} onChange={(event) => setTarget(event.target.value)} required /><em>{template.unit}</em></span></label>
+        <div className="phase2-what-counts"><Info size={17} /><span><strong>What counts</strong><small>{template.description} Missing nutrient fields stay missing and make the total partial.</small></span></div>
+        <button className="primary-button" type="submit" disabled={!valid}><Check size={18} />{goal ? "Save changes" : "Start this goal"}</button>
+        {!goal && <button className="secondary-button" type="button" disabled={!valid} onClick={(event) => submit(event, "draft")}><Clock3 size={17} />Save as draft</button>}
+      </form>
+    </Phase2Sheet>
+  );
+}
+
+function WeeklyGoalDetailSheet({ goal, definition, historical, onClose, onEdit, onLifecycle }) {
+  const lifecycle = definition?.status || goal.lifecycleStatus || "active";
+  return (
+    <Phase2Sheet titleId="weekly-goal-detail-title" onClose={onClose} className="phase2-goal-detail-sheet">
+      <header className="phase2-sheet-header phase2-detail-header">
+        <div><span className="eyebrow">{historical ? "Saved weekly evidence" : goal.statusLabel}</span><h2 id="weekly-goal-detail-title">{goal.label}</h2><p>{goal.directionLabel} {formatMetric(goal.target)} {goal.unit} per week.</p></div>
+        <button type="button" onClick={onClose} aria-label="Close goal details"><X size={20} /></button>
+      </header>
+
+      <div className={`phase2-detail-summary status-${goal.status}`}>
+        <span className="phase2-detail-status-icon">{goal.status === "reached" ? <CircleCheckBig size={21} /> : goal.partial ? <AlertCircle size={21} /> : <Target size={21} />}</span>
+        <div><strong>{goal.hasEvidence ? `${formatMetric(goal.current)} of ${formatMetric(goal.target)} ${goal.unit}` : "No confirmed entries yet"}</strong><p>{goal.summary}</p></div>
+      </div>
+
+      <section className="phase2-evidence-section">
+        <div className="phase2-evidence-heading"><div><span className="eyebrow">By day</span><h3>Weekly progress</h3></div><small>{goal.completeness === "partial" ? "Partial data" : goal.hasEvidence ? "Confirmed evidence" : "Waiting for evidence"}</small></div>
+        <div className="phase2-day-list">
+          {(goal.dailyProgress || []).map((day) => (
+            <div key={day.dateKey}>
+              <span><strong>{day.label}</strong><small>{day.evidenceCount ? `${day.evidenceCount} supporting ${day.evidenceCount === 1 ? "entry" : "entries"}` : "No confirmed entry"}</small></span>
+              <em>{day.evidenceCount ? `${formatMetric(day.value)}${day.missingCount ? " + missing" : ""}` : "-"}</em>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="phase2-evidence-section">
+        <div className="phase2-evidence-heading"><div><span className="eyebrow">Supporting evidence</span><h3>What counted</h3></div><small>{goal.evidenceCount} {goal.evidenceCount === 1 ? "entry" : "entries"}</small></div>
+        {goal.evidence.length > 0 ? (
+          <div className="phase2-evidence-list">
+            {goal.evidence.map((item) => (
+              <div key={item.id} className={item.missing ? "missing" : ""}>
+                <span className="phase2-evidence-source">{item.sourceType === "plate-entry" || item.sourceType === "plate-day" ? <Utensils size={16} /> : item.sourceType === "restaurant-meal" ? <ReceiptText size={16} /> : <Check size={16} />}</span>
+                <span><strong>{item.label}</strong><small>{displayEvidenceDate(item.dateKey)} | {item.detail}</small></span>
+                <em>{formatEvidenceValue(item)}</em>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="phase2-evidence-empty"><Info size={19} /><span><strong>Nothing confirmed yet</strong><small>Supported Today's Plate entries, scans, meals, or visits will appear here.</small></span></div>
+        )}
+        {goal.missingEvidenceCount > 0 && <p className="phase2-missing-note"><AlertCircle size={16} />{goal.missingEvidenceCount} supporting {goal.missingEvidenceCount === 1 ? "entry is" : "entries are"} missing the required field, so this result remains partial.</p>}
+      </section>
+
+      {historical ? (
+        <p className="phase2-readonly-sheet-note"><ShieldCheck size={16} />This recap is immutable. Current goal edits do not change it.</p>
+      ) : (
+        <div className="phase2-goal-actions">
+          <button type="button" onClick={onEdit}><Edit3 size={17} />Edit</button>
+          {lifecycle === "active" && <button type="button" onClick={() => onLifecycle("paused")}><Pause size={17} />Pause</button>}
+          {lifecycle !== "active" && lifecycle !== "archived" && <button type="button" onClick={() => onLifecycle("active")}><Play size={17} />Activate</button>}
+          {lifecycle === "active" && <button type="button" onClick={() => onLifecycle("completed")}><CircleCheckBig size={17} />Complete</button>}
+          <button type="button" onClick={() => onLifecycle("archived")}><Archive size={17} />Archive</button>
+        </div>
+      )}
+    </Phase2Sheet>
+  );
+}
+
+function displayEvidenceDate(value) {
+  const [year, month, day] = String(value || "").split("-").map(Number);
+  if (!year || !month || !day) return "Date unavailable";
+  return new Date(year, month - 1, day, 12).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
 function PlacesPanel({ state, weeklySummary, dailyTotals, dailyGoals, personalProfile, onChange, onConfirmVisit, onLogMeal }) {

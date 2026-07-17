@@ -1,11 +1,15 @@
 import { getLongTermGoalTemplate, getWeeklyGoalTemplate } from "../data/restaurantGoalRules";
 import { isSupportedLocationContext } from "../data/locationContextTypes";
 
-export const PHASE2_STORAGE_KEY = "ziya-context-layer-v1";
-export const PHASE2_STATE_VERSION = 1;
+export const PHASE2_STORAGE_KEY = "ziya-context-layer-v2";
+export const PHASE2_LEGACY_STORAGE_KEYS = Object.freeze(["ziya-context-layer-v1"]);
+export const PHASE2_STATE_VERSION = 2;
+
+const WEEKLY_GOAL_STATUSES = new Set(["draft", "active", "paused", "completed", "archived"]);
 
 const MAX_ITEMS = Object.freeze({
   weeklyGoals: 20,
+  weeklySnapshots: 104,
   longTermGoals: 20,
   activities: 1000,
   restaurants: 100,
@@ -66,17 +70,115 @@ function sanitizeWeeklyGoal(goal) {
   const template = getWeeklyGoalTemplate(goal.templateId || goal.id);
   if (!template) return null;
   const target = number(goal.target, template.defaultTarget);
+  const status = WEEKLY_GOAL_STATUSES.has(goal.status)
+    ? goal.status
+    : goal.enabled === false ? "paused" : "active";
+  const createdAt = iso(goal.createdAt, new Date().toISOString());
   return {
     id: validId(goal.instanceId || goal.id, "weekly"),
     templateId: template.id,
     label: text(goal.label, 100) || template.label,
     target: Math.max(0.1, target),
-    enabled: goal.enabled !== false,
-    createdAt: iso(goal.createdAt, new Date().toISOString()),
-    updatedAt: iso(goal.updatedAt, new Date().toISOString())
+    status,
+    enabled: status === "active",
+    ruleVersion: Math.max(1, Math.floor(number(goal.ruleVersion, 1))),
+    activatedAt: iso(goal.activatedAt, status === "active" ? createdAt : null),
+    pausedAt: iso(goal.pausedAt, status === "paused" ? iso(goal.updatedAt, createdAt) : null),
+    completedAt: iso(goal.completedAt, status === "completed" ? iso(goal.updatedAt, createdAt) : null),
+    archivedAt: iso(goal.archivedAt, status === "archived" ? iso(goal.updatedAt, createdAt) : null),
+    createdAt,
+    updatedAt: iso(goal.updatedAt, createdAt)
   };
 }
 
+function sanitizeSnapshotEvidence(item) {
+  if (!item || typeof item !== "object") return null;
+  const id = text(item.id, 180);
+  if (!id) return null;
+  return {
+    id,
+    sourceId: text(item.sourceId, 180) || id,
+    sourceType: text(item.sourceType, 60) || "confirmed-event",
+    dateKey: /^\d{4}-\d{2}-\d{2}$/.test(item.dateKey) ? item.dateKey : "",
+    occurredAt: iso(item.occurredAt),
+    label: text(item.label, 160) || "Confirmed entry",
+    detail: text(item.detail, 300),
+    value: number(item.value),
+    unit: text(item.unit, 40),
+    missing: Boolean(item.missing),
+    metadata: item.metadata && typeof item.metadata === "object" ? { ...item.metadata } : {}
+  };
+}
+
+function sanitizeSnapshotGoal(goal) {
+  if (!goal || typeof goal !== "object") return null;
+  const template = getWeeklyGoalTemplate(goal.templateId);
+  if (!template) return null;
+  const evidence = asArray(goal.evidence).map(sanitizeSnapshotEvidence).filter(Boolean).slice(0, 500);
+  const target = Math.max(0.1, number(goal.target, template.defaultTarget));
+  const current = Math.max(0, number(goal.current, 0));
+  const statuses = new Set(["no-data", "in-progress", "room-left", "close", "partial", "reached", "over"]);
+  return {
+    id: validId(goal.id, "weekly"),
+    templateId: template.id,
+    label: text(goal.label, 100) || template.label,
+    description: text(goal.description, 260) || template.description,
+    unit: text(goal.unit, 40) || template.unit,
+    direction: ["minimum", "limit", "average-limit", "consistency"].includes(goal.direction) ? goal.direction : template.direction,
+    directionLabel: text(goal.directionLabel, 80),
+    target,
+    current,
+    remaining: Math.max(0, number(goal.remaining, target - current)),
+    progress: Math.min(100, Math.max(0, number(goal.progress, 0))),
+    reached: Boolean(goal.reached),
+    partial: Boolean(goal.partial),
+    hasEvidence: Boolean(goal.hasEvidence),
+    status: statuses.has(goal.status) ? goal.status : "no-data",
+    statusLabel: text(goal.statusLabel, 80) || "Not enough data",
+    lifecycleStatus: WEEKLY_GOAL_STATUSES.has(goal.lifecycleStatus) ? goal.lifecycleStatus : "active",
+    completeness: ["none", "partial", "complete"].includes(goal.completeness) ? goal.completeness : "none",
+    evidenceCount: evidence.length,
+    missingEvidenceCount: evidence.filter((item) => item.missing).length,
+    evidenceIds: evidence.map((item) => item.id),
+    evidence,
+    dailyProgress: asArray(goal.dailyProgress).map((day) => ({
+      dateKey: /^\d{4}-\d{2}-\d{2}$/.test(day?.dateKey) ? day.dateKey : "",
+      label: text(day?.label, 80),
+      value: Math.max(0, number(day?.value, 0)),
+      evidenceCount: Math.max(0, number(day?.evidenceCount, 0)),
+      missingCount: Math.max(0, number(day?.missingCount, 0)),
+      evidenceIds: asArray(day?.evidenceIds).map((id) => text(id, 180)).filter(Boolean).slice(0, 100)
+    })).filter((day) => day.dateKey).slice(0, 7),
+    summary: text(goal.summary, 220),
+    nextStep: text(goal.nextStep, 260),
+    ruleVersion: Math.max(1, Math.floor(number(goal.ruleVersion, 1)))
+  };
+}
+
+function sanitizeWeeklySnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const weekStartKey = /^\d{4}-\d{2}-\d{2}$/.test(snapshot.weekStartKey) ? snapshot.weekStartKey : "";
+  const weekEndKey = /^\d{4}-\d{2}-\d{2}$/.test(snapshot.weekEndKey) ? snapshot.weekEndKey : "";
+  if (!weekStartKey || !weekEndKey) return null;
+  const goals = asArray(snapshot.goals).map(sanitizeSnapshotGoal).filter(Boolean).slice(0, MAX_ITEMS.weeklyGoals);
+  return {
+    id: `weekly-snapshot:${weekStartKey}`,
+    weekStartKey,
+    weekEndKey,
+    startAt: iso(snapshot.startAt),
+    endAt: iso(snapshot.endAt),
+    capturedAt: iso(snapshot.capturedAt, new Date().toISOString()),
+    immutable: true,
+    ruleVersion: Math.max(1, Math.floor(number(snapshot.ruleVersion, 1))),
+    summary: text(snapshot.summary, 300),
+    goals,
+    goalIds: goals.map((goal) => goal.id),
+    evidenceIds: [...new Set(goals.flatMap((goal) => goal.evidenceIds))].slice(0, 2000),
+    evidenceGoalCount: Math.max(0, number(snapshot.evidenceGoalCount, goals.filter((goal) => goal.hasEvidence).length)),
+    partialGoalCount: Math.max(0, number(snapshot.partialGoalCount, goals.filter((goal) => goal.partial).length)),
+    reachedCount: Math.max(0, number(snapshot.reachedCount, goals.filter((goal) => goal.status === "reached").length))
+  };
+}
 function sanitizeLongTermGoal(goal) {
   if (!goal || typeof goal !== "object") return null;
   const template = getLongTermGoalTemplate(goal.templateId || goal.id);
@@ -248,11 +350,27 @@ export function createPhase2Id(prefix = "context") {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 9)}`;
 }
 
+export function migratePhase2State(value) {
+  if (!value || typeof value !== "object") return value;
+  const version = Math.max(1, Math.floor(number(value.version, 1)));
+  if (version >= PHASE2_STATE_VERSION) return value;
+  return {
+    ...value,
+    version: PHASE2_STATE_VERSION,
+    weeklyGoals: asArray(value.weeklyGoals).map((goal) => ({
+      ...goal,
+      status: WEEKLY_GOAL_STATUSES.has(goal?.status) ? goal.status : goal?.enabled === false ? "paused" : "active",
+      ruleVersion: Math.max(1, Math.floor(number(goal?.ruleVersion, 1)))
+    })),
+    weeklySnapshots: asArray(value.weeklySnapshots)
+  };
+}
 export function createEmptyPhase2State() {
   const now = new Date().toISOString();
   return {
     version: PHASE2_STATE_VERSION,
     weeklyGoals: [],
+    weeklySnapshots: [],
     longTermGoals: [],
     activities: [],
     restaurants: [],
@@ -270,6 +388,7 @@ export function createEmptyPhase2State() {
 export function sanitizePhase2State(value) {
   const base = createEmptyPhase2State();
   if (!value || typeof value !== "object") return base;
+  value = migratePhase2State(value);
   const context = value.currentContext && typeof value.currentContext === "object"
     ? {
         placeId: text(value.currentContext.placeId, 120),
@@ -283,6 +402,7 @@ export function sanitizePhase2State(value) {
   return {
     version: PHASE2_STATE_VERSION,
     weeklyGoals: limited(value.weeklyGoals, "weeklyGoals", sanitizeWeeklyGoal),
+    weeklySnapshots: limited(value.weeklySnapshots, "weeklySnapshots", sanitizeWeeklySnapshot),
     longTermGoals: limited(value.longTermGoals, "longTermGoals", sanitizeLongTermGoal),
     activities: limited(value.activities, "activities", sanitizeActivity),
     restaurants: limited(value.restaurants, "restaurants", sanitizeRestaurant),
@@ -316,7 +436,13 @@ export function sanitizePhase2State(value) {
 export function loadPhase2State() {
   if (typeof window === "undefined") return createEmptyPhase2State();
   try {
-    return sanitizePhase2State(JSON.parse(window.localStorage.getItem(PHASE2_STORAGE_KEY) || "null"));
+    const current = window.localStorage.getItem(PHASE2_STORAGE_KEY);
+    if (current) return sanitizePhase2State(JSON.parse(current));
+    for (const key of PHASE2_LEGACY_STORAGE_KEYS) {
+      const legacy = window.localStorage.getItem(key);
+      if (legacy) return sanitizePhase2State(JSON.parse(legacy));
+    }
+    return createEmptyPhase2State();
   } catch {
     return createEmptyPhase2State();
   }
@@ -353,6 +479,18 @@ function mergeById(localItems, cloudItems, limit) {
     .slice(0, limit);
 }
 
+function mergeImmutableSnapshots(localItems, cloudItems, limit) {
+  const values = new Map();
+  asArray(cloudItems).forEach((item) => {
+    if (item?.weekStartKey) values.set(item.weekStartKey, item);
+  });
+  asArray(localItems).forEach((item) => {
+    if (item?.weekStartKey) values.set(item.weekStartKey, item);
+  });
+  return [...values.values()]
+    .sort((a, b) => String(b.weekStartKey).localeCompare(String(a.weekStartKey)))
+    .slice(0, limit);
+}
 function filterDeleted(items, kind, deletedItems) {
   const tombstones = new Map(deletedItems.filter((item) => item.kind === kind).map((item) => [item.targetId, item]));
   return items.filter((item) => {
@@ -384,6 +522,7 @@ export function mergePhase2States(localValue, cloudValue) {
   return sanitizePhase2State({
     ...newest,
     weeklyGoals: filterDeleted(mergeById(local.weeklyGoals, cloud.weeklyGoals, MAX_ITEMS.weeklyGoals), "weeklyGoal", deletedItems),
+    weeklySnapshots: mergeImmutableSnapshots(local.weeklySnapshots, cloud.weeklySnapshots, MAX_ITEMS.weeklySnapshots),
     longTermGoals: filterDeleted(mergeById(local.longTermGoals, cloud.longTermGoals, MAX_ITEMS.longTermGoals), "longTermGoal", deletedItems),
     activities: filterDeleted(mergeById(local.activities, cloud.activities, MAX_ITEMS.activities), "activity", deletedItems),
     restaurants: filterDeleted(mergeById(local.restaurants, cloud.restaurants, MAX_ITEMS.restaurants), "restaurant", deletedItems),

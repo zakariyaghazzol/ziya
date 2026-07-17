@@ -1,11 +1,27 @@
 import assert from "node:assert/strict";
-import { createWeeklyGoal, buildWeeklyGoalSummary, getWeekWindow } from "../src/lib/weeklyGoalEngine.js";
+import {
+  buildWeeklyGoalSummary,
+  createWeeklyGoal,
+  createWeeklySnapshot,
+  getWeekWindow,
+  materializeClosedWeeklySnapshots,
+  shiftWeekWindow,
+  transitionWeeklyGoal,
+  updateWeeklyGoal
+} from "../src/lib/weeklyGoalEngine.js";
 import { createLongTermGoal, buildLongTermGoalSummary } from "../src/lib/longTermGoalEngine.js";
 import { analyzeGoalFit, analyzePreparationDetails, rankMenuItemsForGoals } from "../src/lib/goalFitAnalyzer.js";
 import { parseReceiptText } from "../src/lib/receiptParser.js";
 import { findNearbySavedPlace, haversineDistanceMeters } from "../src/lib/locationContextDetector.js";
 import { buildContextualNudge } from "../src/lib/contextualNudgeEngine.js";
-import { createEmptyPhase2State, createPhase2DeletionPatch, mergePhase2States, sanitizePhase2State } from "../src/lib/phase2State.js";
+import {
+  PHASE2_STATE_VERSION,
+  createEmptyPhase2State,
+  createPhase2DeletionPatch,
+  mergePhase2States,
+  migratePhase2State,
+  sanitizePhase2State
+} from "../src/lib/phase2State.js";
 
 const now = new Date("2026-07-16T12:00:00-04:00");
 const week = getWeekWindow(now);
@@ -220,7 +236,206 @@ function testStaleContextDoesNotNudge() {
   assert.equal(buildContextualNudge({ phase2State: state, weeklySummary: { window: week, goals: [], activities: [] }, now }), null);
 }
 
+function testLocalWeekBoundaries() {
+  const sunday = getWeekWindow(new Date(2026, 2, 8, 23, 59, 0));
+  assert.equal(sunday.startKey, "2026-03-02");
+  assert.equal(sunday.endKey, "2026-03-08");
+  assert.equal(sunday.keys.length, 7);
+  const monday = getWeekWindow(new Date(2026, 2, 9, 0, 1, 0));
+  assert.equal(monday.startKey, "2026-03-09");
+  assert.equal(monday.endKey, "2026-03-15");
+}
+
+function testZeroEvidenceAndDirectionSemantics() {
+  const state = createEmptyPhase2State();
+  state.weeklyGoals = [
+    createWeeklyGoal("fast_food_limit", { id: "zero-limit", target: 2, now }),
+    createWeeklyGoal("gym_visits", { id: "zero-target", target: 3, now })
+  ];
+  const summary = buildWeeklyGoalSummary({ phase2State: state, plateState: { goals: null, days: {} }, now });
+  const limit = summary.goals.find((goal) => goal.id === "zero-limit");
+  const target = summary.goals.find((goal) => goal.id === "zero-target");
+  assert.equal(limit.directionLabel, "Stay at or below");
+  assert.equal(target.directionLabel, "Reach at least");
+  assert.equal(limit.status, "no-data");
+  assert.equal(target.status, "no-data");
+  assert.equal(limit.reached, false);
+  assert.equal(target.reached, false);
+  assert.equal(summary.onTrackCount, 0);
+  assert.match(limit.summary, /No confirmed entries yet/);
+}
+
+function testPartialNutritionEvidence() {
+  const state = createEmptyPhase2State();
+  state.weeklyGoals = [createWeeklyGoal("weekly_sodium_limit", { id: "partial-sodium", target: 2300, now })];
+  const plate = {
+    goals: { protein: 100 },
+    days: {
+      [week.keys[0]]: {
+        goalsSnapshot: { protein: 100 },
+        entries: [plateEntry("known-sodium", { protein: 20, sodium: 600 })]
+      },
+      [week.keys[1]]: {
+        goalsSnapshot: { protein: 100 },
+        entries: [plateEntry("missing-sodium", { protein: 30 })]
+      }
+    }
+  };
+  const goal = buildWeeklyGoalSummary({ phase2State: state, plateState: plate, now }).goals[0];
+  assert.equal(goal.current, 600);
+  assert.equal(goal.partial, true);
+  assert.equal(goal.status, "partial");
+  assert.equal(goal.evidenceCount, 2);
+  assert.equal(goal.missingEvidenceCount, 1);
+  assert.equal(goal.evidence.find((item) => item.sourceId === "missing-sodium").missing, true);
+  assert.match(goal.summary, /partial total/);
+
+  const proteinState = createEmptyPhase2State();
+  proteinState.weeklyGoals = [createWeeklyGoal("protein_goal_days", { id: "partial-protein", target: 3, now })];
+  const proteinPlate = {
+    goals: { protein: 100 },
+    days: {
+      [week.keys[0]]: {
+        goalsSnapshot: { protein: 100 },
+        entries: [
+          plateEntry("known-protein", { protein: 120 }),
+          plateEntry("missing-protein", { sodium: 200 })
+        ]
+      }
+    }
+  };
+  const proteinGoal = buildWeeklyGoalSummary({ phase2State: proteinState, plateState: proteinPlate, now }).goals[0];
+  assert.equal(proteinGoal.current, 1);
+  assert.equal(proteinGoal.partial, true);
+  assert.equal(proteinGoal.dailyProgress[0].value, 1);
+  assert.equal(proteinGoal.dailyProgress[0].missingCount, 1);
+}
+
+function testEvidenceDeduplicationAndCorrection() {
+  const state = createEmptyPhase2State();
+  state.weeklyGoals = [createWeeklyGoal("gym_visits", { id: "dedupe-gym", target: 2, now })];
+  const activity = { id: "same-visit", type: "gym_visit", source: "manual", occurredAt: now.toISOString(), metadata: {} };
+  state.activities = [activity, { ...activity }];
+  const withVisit = buildWeeklyGoalSummary({ phase2State: state, plateState: { days: {} }, now }).goals[0];
+  assert.equal(withVisit.current, 1);
+  assert.equal(withVisit.evidenceCount, 1);
+  state.activities = [];
+  const afterDeletion = buildWeeklyGoalSummary({ phase2State: state, plateState: { days: {} }, now }).goals[0];
+  assert.equal(afterDeletion.status, "no-data");
+  assert.equal(afterDeletion.evidenceCount, 0);
+}
+
+function testWeeklyGoalLifecycle() {
+  const draft = createWeeklyGoal("grocery_scans", { id: "lifecycle", status: "draft", target: 3, now });
+  assert.equal(draft.status, "draft");
+  assert.equal(draft.enabled, false);
+  const active = transitionWeeklyGoal(draft, "active", new Date("2026-07-16T13:00:00.000Z"));
+  assert.equal(active.status, "active");
+  assert.equal(active.enabled, true);
+  const paused = transitionWeeklyGoal(active, "paused", new Date("2026-07-16T14:00:00.000Z"));
+  assert.equal(paused.status, "paused");
+  assert.ok(paused.pausedAt);
+  const completed = transitionWeeklyGoal(paused, "completed", new Date("2026-07-16T15:00:00.000Z"));
+  assert.equal(completed.status, "completed");
+  const archived = transitionWeeklyGoal(completed, "archived", new Date("2026-07-16T16:00:00.000Z"));
+  assert.equal(archived.status, "archived");
+  const edited = updateWeeklyGoal(active, { target: 5, label: "Five grocery scans" }, new Date("2026-07-16T17:00:00.000Z"));
+  assert.equal(edited.target, 5);
+  assert.equal(active.target, 3);
+  assert.equal(edited.status, "active");
+
+  const priorWindow = shiftWeekWindow(week, -1);
+  const created = createWeeklyGoal("gym_visits", {
+    id: "reactivated-snapshot",
+    createdAt: new Date(priorWindow.start.getTime() - (2 * DAY_FOR_TEST)).toISOString(),
+    now: new Date(priorWindow.start.getTime() - (2 * DAY_FOR_TEST))
+  });
+  const pausedBeforeWeek = transitionWeeklyGoal(created, "paused", new Date(priorWindow.start.getTime() - DAY_FOR_TEST));
+  const reactivatedInWeek = transitionWeeklyGoal(pausedBeforeWeek, "active", new Date(priorWindow.start.getTime() + DAY_FOR_TEST));
+  const snapshot = createWeeklySnapshot({
+    phase2State: { ...createEmptyPhase2State(), weeklyGoals: [reactivatedInWeek] },
+    plateState: { days: {} },
+    window: priorWindow,
+    now
+  });
+  assert.equal(snapshot.goals.length, 1);
+  assert.equal(snapshot.goals[0].id, "reactivated-snapshot");
+}
+
+function testImmutableWeeklySnapshots() {
+  const priorWindow = shiftWeekWindow(week, -1);
+  const createdAt = new Date(priorWindow.start.getTime() - 60 * 60 * 1000).toISOString();
+  const state = createEmptyPhase2State();
+  state.weeklyGoals = [createWeeklyGoal("gym_visits", {
+    id: "snapshot-goal",
+    target: 2,
+    createdAt,
+    activatedAt: createdAt,
+    now: new Date(createdAt)
+  })];
+  state.activities = [{
+    id: "prior-gym",
+    type: "gym_visit",
+    source: "manual",
+    occurredAt: new Date(priorWindow.start.getTime() + DAY_FOR_TEST).toISOString(),
+    metadata: {}
+  }];
+  const snapshot = createWeeklySnapshot({ phase2State: state, plateState: { days: {} }, window: priorWindow, now });
+  assert.equal(snapshot.goals[0].target, 2);
+  assert.equal(snapshot.goals[0].current, 1);
+  assert.deepEqual(snapshot.evidenceIds, ["activity:prior-gym"]);
+
+  const editedGoal = updateWeeklyGoal(state.weeklyGoals[0], { target: 7 }, now);
+  const nextState = { ...state, weeklyGoals: [editedGoal], weeklySnapshots: [snapshot] };
+  const snapshots = materializeClosedWeeklySnapshots({ phase2State: nextState, plateState: { days: {} }, now });
+  assert.equal(snapshots.find((item) => item.id === snapshot.id).goals[0].target, 2);
+  assert.equal(snapshot.goals[0].target, 2);
+}
+
+function testPhase2MigrationAndSnapshotMerge() {
+  const migrated = migratePhase2State({
+    version: 1,
+    weeklyGoals: [{ id: "legacy-active", templateId: "gym_visits", target: 2, enabled: true }],
+    deletedItems: [{ id: "activity:old", kind: "activity", targetId: "old", deletedAt: now.toISOString() }]
+  });
+  const sanitized = sanitizePhase2State(migrated);
+  assert.equal(sanitized.version, PHASE2_STATE_VERSION);
+  assert.equal(sanitized.weeklyGoals[0].status, "active");
+  assert.equal(sanitized.deletedItems.length, 1);
+
+  const pausedLegacy = sanitizePhase2State({
+    version: 1,
+    weeklyGoals: [{ id: "legacy-paused", templateId: "gym_visits", target: 2, enabled: false }]
+  });
+  assert.equal(pausedLegacy.weeklyGoals[0].status, "paused");
+
+  const priorWindow = shiftWeekWindow(week, -1);
+  const local = createEmptyPhase2State();
+  local.weeklyGoals = [createWeeklyGoal("gym_visits", { id: "merge-goal", target: 2, createdAt: priorWindow.start.toISOString(), now: priorWindow.start })];
+  const localSnapshot = createWeeklySnapshot({ phase2State: local, plateState: { days: {} }, window: priorWindow, now });
+  local.weeklySnapshots = [localSnapshot];
+  local.updatedAt = "2026-07-16T10:00:00.000Z";
+  const cloud = createEmptyPhase2State();
+  cloud.weeklySnapshots = [{
+    ...localSnapshot,
+    capturedAt: "2026-07-16T11:00:00.000Z",
+    goals: localSnapshot.goals.map((goal) => ({ ...goal, target: 99 }))
+  }];
+  cloud.updatedAt = "2026-07-16T11:00:00.000Z";
+  const merged = mergePhase2States(local, cloud);
+  assert.equal(merged.weeklySnapshots.length, 1);
+  assert.equal(merged.weeklySnapshots[0].goals[0].target, 2);
+}
+
+const DAY_FOR_TEST = 12 * 60 * 60 * 1000;
 testStateSanitationAndMerge();
+testLocalWeekBoundaries();
+testZeroEvidenceAndDirectionSemantics();
+testPartialNutritionEvidence();
+testEvidenceDeduplicationAndCorrection();
+testWeeklyGoalLifecycle();
+testImmutableWeeklySnapshots();
+testPhase2MigrationAndSnapshotMerge();
 testWeeklyGoals();
 testLongTermGoals();
 testGoalFitDoesNotInventValues();
